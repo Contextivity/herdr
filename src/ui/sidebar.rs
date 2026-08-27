@@ -1,3 +1,4 @@
+mod orchestration;
 mod tokens;
 
 use ratatui::{
@@ -8,6 +9,7 @@ use ratatui::{
     Frame,
 };
 
+use self::orchestration::{AgentPanelItem, AgentPanelLayout};
 use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
@@ -115,6 +117,17 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 
 pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
+}
+
+pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
+    if collect_agent_panel_entries_with_runtimes(app, None)
+        .iter()
+        .any(|entry| entry.tokens.contains_key("orchestration_id"))
+    {
+        0.15
+    } else {
+        app.sidebar_section_split
+    }
 }
 
 pub(crate) fn agent_panel_entries_from(
@@ -311,7 +324,7 @@ pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], i
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, effective_sidebar_section_split(app));
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -551,6 +564,91 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
     tokens::agent_rows(&app.sidebar_agents, entry, label)
 }
 
+fn orchestration_layout(app: &AppState, entries: &[AgentPanelEntry]) -> AgentPanelLayout {
+    let active = entries
+        .iter()
+        .find(|entry| app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id))
+        .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id));
+    orchestration::build(entries, &app.collapsed_space_keys, active)
+}
+
+pub(crate) fn orchestration_collapse_key(orchestration_id: &str) -> String {
+    orchestration::collapse_key(orchestration_id)
+}
+
+fn agent_panel_item_height(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    item: &AgentPanelItem,
+    body_height: u16,
+) -> u16 {
+    match item {
+        AgentPanelItem::LegacyAgent { entry_index } => entries
+            .get(*entry_index)
+            .map(|entry| agent_entry_height_in_body(app, entry, body_height))
+            .unwrap_or(0),
+        _ => item.height().min(body_height),
+    }
+}
+
+fn agent_panel_item_gap(
+    app: &AppState,
+    item: &AgentPanelItem,
+    item_index: usize,
+    item_count: usize,
+) -> u16 {
+    if item_index + 1 >= item_count {
+        return 0;
+    }
+    match item {
+        AgentPanelItem::RunFooter => 1,
+        AgentPanelItem::LegacyAgent { .. } => app.sidebar_agents.row_gap,
+        _ => 0,
+    }
+}
+
+fn card_header_line(label: &str, owner: &str, width: u16) -> String {
+    if width < 2 {
+        return "─".repeat(width as usize);
+    }
+    let inner = width.saturating_sub(2) as usize;
+    let owner_width = display_width(owner).min(inner);
+    let label_width = inner.saturating_sub(owner_width).saturating_sub(1);
+    let label = truncate_end(label, label_width);
+    let gap = inner
+        .saturating_sub(display_width(&label))
+        .saturating_sub(owner_width);
+    format!("┌{label}{}{owner}┐", "─".repeat(gap))
+}
+
+fn card_content_line(text: &str, width: u16) -> String {
+    if width < 2 {
+        return truncate_end(text, width as usize);
+    }
+    let inner = width.saturating_sub(2) as usize;
+    let text = truncate_end(text, inner);
+    let gap = inner.saturating_sub(display_width(&text));
+    format!("│{text}{}│", " ".repeat(gap))
+}
+
+fn card_divider_line(label: &str, width: u16) -> String {
+    if width < 2 {
+        return "─".repeat(width as usize);
+    }
+    let inner = width.saturating_sub(2) as usize;
+    let label = truncate_end(label, inner);
+    let gap = inner.saturating_sub(display_width(&label));
+    format!("├{label}{}┤", "─".repeat(gap))
+}
+
+fn card_footer_line(width: u16) -> String {
+    match width {
+        0 => String::new(),
+        1 => "└".into(),
+        _ => format!("└{}┘", "─".repeat(width.saturating_sub(2) as usize)),
+    }
+}
+
 pub(crate) fn agent_entry_height_in_body(
     app: &AppState,
     entry: &AgentPanelEntry,
@@ -563,14 +661,6 @@ pub(crate) fn agent_entry_height_in_body(
         .min(body_height)
 }
 
-pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usize) -> u16 {
-    if entry_idx + 1 < entry_count {
-        app.sidebar_agents.row_gap
-    } else {
-        0
-    }
-}
-
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = agent_panel_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
@@ -580,15 +670,21 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
     let mut used_rows = 0u16;
     let mut visible = 0usize;
     let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
+    let layout = orchestration_layout(app, &entries);
+    for (item_index, item) in layout.items.iter().enumerate().skip(scroll) {
+        let height = agent_panel_item_height(app, &entries, item, body.height);
         if used_rows.saturating_add(height) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(height);
         visible += 1;
         used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .saturating_add(agent_panel_item_gap(
+                app,
+                item,
+                item_index,
+                layout.items.len(),
+            ))
             .min(body.height);
     }
     visible
@@ -597,18 +693,19 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
     let entries = agent_panel_entries(app);
+    let layout = orchestration_layout(app, &entries);
     let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (index, entry) in entries.iter().enumerate().rev() {
-        let gap = agent_entry_gap(app, index, entries.len());
-        let needed = agent_entry_height_in_body(app, entry, body.height).saturating_add(gap);
+    let mut start = layout.items.len();
+    for (index, item) in layout.items.iter().enumerate().rev() {
+        let needed = agent_panel_item_height(app, &entries, item, body.height)
+            .saturating_add(agent_panel_item_gap(app, item, index, layout.items.len()));
         if used_rows.saturating_add(needed) > body.height {
             break;
         }
         used_rows = used_rows.saturating_add(needed);
         start = index;
     }
-    start.min(entries.len().saturating_sub(1))
+    start.min(layout.items.len().saturating_sub(1))
 }
 
 pub(crate) fn agent_panel_scroll_for_target(
@@ -617,6 +714,11 @@ pub(crate) fn agent_panel_scroll_for_target(
     current_scroll: usize,
     target: usize,
 ) -> usize {
+    let entries = agent_panel_entries(app);
+    let layout = orchestration_layout(app, &entries);
+    let Some(target) = layout.item_index_for_agent(target) else {
+        return current_scroll.min(agent_panel_bottom_start(app, area));
+    };
     let max_scroll = agent_panel_bottom_start(app, area);
     if target < current_scroll {
         return target.min(max_scroll);
@@ -655,11 +757,47 @@ pub(crate) fn agent_panel_scrollbar_rect(app: &AppState, area: Rect) -> Option<R
     ))
 }
 
+pub(crate) fn agent_panel_item_at_row(
+    app: &AppState,
+    area: Rect,
+    row: u16,
+) -> Option<AgentPanelItem> {
+    let metrics = agent_panel_scroll_metrics(app, area);
+    let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
+    if body.height == 0 || row < body.y || row >= body.y + body.height {
+        return None;
+    }
+    let entries = agent_panel_entries(app);
+    let layout = orchestration_layout(app, &entries);
+    let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
+    let mut row_y = body.y;
+    let body_bottom = body.y + body.height;
+    for (item_index, item) in layout.items.iter().enumerate().skip(scroll) {
+        let height = agent_panel_item_height(app, &entries, item, body.height);
+        if row_y.saturating_add(height) > body_bottom {
+            break;
+        }
+        if row >= row_y && row < row_y.saturating_add(height) {
+            return Some(item.clone());
+        }
+        row_y = row_y
+            .saturating_add(height)
+            .saturating_add(agent_panel_item_gap(
+                app,
+                item,
+                item_index,
+                layout.items.len(),
+            ))
+            .min(body_bottom);
+    }
+    None
+}
+
 pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, effective_sidebar_section_split(app));
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1002,7 +1140,8 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area) =
+        expanded_sidebar_sections(area, effective_sidebar_section_split(app));
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
@@ -1474,6 +1613,7 @@ fn render_agent_detail(
     }
 
     let details = agent_panel_entries_from(app, terminal_runtimes);
+    let layout = orchestration_layout(app, &details);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
@@ -1492,54 +1632,164 @@ fn render_agent_detail(
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
     let mut row_y = body.y;
     let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
+    for (item_index, item) in layout.items.iter().enumerate().skip(scroll) {
+        let height = agent_panel_item_height(app, &details, item, body.height);
         if row_y.saturating_add(height) > body_bottom {
             break;
         }
-
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.active_row_bg)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
-
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+        match item {
+            AgentPanelItem::RunHeader {
+                label,
+                owner,
+                lifecycle,
+                counts,
+                collapsed,
+                ..
+            } => {
+                let marker = if *collapsed { "▸" } else { "▾" };
+                let title = card_header_line(
+                    &format!("{marker} {label}"),
+                    &owner.to_ascii_uppercase(),
+                    body.width,
+                );
+                frame.render_widget(
+                    Paragraph::new(title)
+                        .style(Style::default().fg(p.text).add_modifier(Modifier::BOLD)),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+                let summary = format!(
+                    "{} · {} working · {} waiting · {} done",
+                    lifecycle.to_ascii_uppercase(),
+                    counts.working,
+                    counts.waiting,
+                    counts.done
+                );
+                let lifecycle_color = match lifecycle.as_str() {
+                    "active" => p.green,
+                    "suspect" | "dormant" => p.yellow,
+                    "abandoned" => p.red,
+                    _ => p.overlay0,
+                };
+                frame.render_widget(
+                    Paragraph::new(card_content_line(&summary, body.width))
+                        .style(Style::default().fg(lifecycle_color)),
+                    Rect::new(body.x, row_y + 1, body.width, 1),
+                );
+            }
+            AgentPanelItem::RepositoryHeader { label, count } => {
+                frame.render_widget(
+                    Paragraph::new(card_divider_line(&format!("{label} · {count}"), body.width))
+                        .style(Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+            }
+            AgentPanelItem::Agent {
+                entry_index,
+                responsibility,
+                metadata,
+                details: extra,
+                status,
+                selected,
+            } => {
+                let Some(detail) = details.get(*entry_index) else {
+                    continue;
+                };
+                let (icon, _) = state_icon(detail.state, detail.seen, app.status_indicators, p);
+                let row_style = if *selected {
+                    Style::default().bg(p.active_row_bg)
+                } else {
+                    Style::default()
+                };
+                let status_color = state_label_color(detail.state, detail.seen, p);
+                frame.render_widget(
+                    Paragraph::new(card_content_line(
+                        &format!("{icon} {responsibility}"),
+                        body.width,
+                    ))
+                    .style(
+                        row_style
+                            .fg(if *selected { p.text } else { p.subtext0 })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+                let metadata_color = if status == "done" {
+                    p.yellow
+                } else {
+                    status_color
+                };
+                frame.render_widget(
+                    Paragraph::new(card_content_line(&format!("  {metadata}"), body.width))
+                        .style(row_style.fg(metadata_color).add_modifier(Modifier::DIM)),
+                    Rect::new(body.x, row_y + 1, body.width, 1),
+                );
+                if *selected {
+                    frame.render_widget(
+                        Paragraph::new(card_content_line(&format!("  {extra}"), body.width))
+                            .style(row_style.fg(p.overlay1).add_modifier(Modifier::DIM)),
+                        Rect::new(body.x, row_y + 2, body.width, 1),
+                    );
+                }
+            }
+            AgentPanelItem::RunFooter => {
+                frame.render_widget(
+                    Paragraph::new(card_footer_line(body.width))
+                        .style(Style::default().fg(p.overlay0)),
+                    Rect::new(body.x, row_y, body.width, 1),
+                );
+            }
+            AgentPanelItem::LegacyAgent { entry_index } => {
+                let Some(detail) = details.get(*entry_index) else {
+                    continue;
+                };
+                let label_color = state_label_color(detail.state, detail.seen, p);
+                let rows = resolved_agent_rows(app, detail);
+                let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+                let row_style = if is_active {
+                    Style::default().bg(p.active_row_bg)
+                } else {
+                    Style::default()
+                };
+                let name_style = Style::default()
+                    .fg(if is_active { p.text } else { p.subtext0 })
+                    .add_modifier(Modifier::BOLD);
+                let status_style = Style::default().fg(label_color).add_modifier(if is_active {
+                    Modifier::empty()
+                } else {
+                    Modifier::DIM
+                });
+                let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+                let state_icon =
+                    state_icon(detail.state, detail.seen, app.status_indicators, p);
+                for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
+                    let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
+                    spans.extend(resolved_token_spans(
+                        resolved,
+                        state_icon,
+                        status_style,
+                        name_style,
+                        agent_style,
+                        agent_style,
+                        p,
+                        body.width
+                            .saturating_sub(if row_index == 0 { 1 } else { 3 })
+                            as usize,
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(row_style),
+                        Rect::new(body.x, row_y + row_index as u16, body.width, 1),
+                    );
+                }
+            }
         }
         row_y = row_y
             .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
+            .saturating_add(agent_panel_item_gap(
+                app,
+                item,
+                item_index,
+                layout.items.len(),
+            ))
             .min(body_bottom);
     }
 
@@ -1694,6 +1944,93 @@ mod tests {
         assert!(agent_style.add_modifier.contains(Modifier::DIM));
         assert!(!agent_style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(agent_style.bg, Some(app.palette.active_row_bg));
+    }
+
+    #[test]
+    fn orchestration_sidebar_renders_card_like_mockup() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("proxy");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Pi);
+        terminal.state = AgentState::Working;
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("orchestration_id".into(), Some("run-1".into())),
+                (
+                    "orchestration_label".into(),
+                    Some("Contextivity backlog".into()),
+                ),
+                ("orchestration_owner".into(), Some("t3".into())),
+                ("orchestration_state".into(), Some("active".into())),
+                ("repository".into(), Some("contextivity-stack".into())),
+                ("responsibility".into(), Some("#280 remaining".into())),
+                ("harness".into(), Some("codex-cli".into())),
+                ("remote_host".into(), Some("ai-dev-w1".into())),
+                ("remote_agent".into(), Some("ctx-280c".into())),
+                ("remote_state".into(), Some("working".into())),
+                ("branch".into(), Some("feat-280c".into())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+
+        let area = Rect::new(0, 0, 42, 40);
+        let (workspace_area, agent_area) =
+            expanded_sidebar_sections(area, effective_sidebar_section_split(&app));
+        assert!(agent_area.height > workspace_area.height * 4);
+        let mut tui = Terminal::new(TestBackend::new(42, 40)).unwrap();
+        tui.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = tui.backend().buffer();
+        let body = agent_panel_body_rect(agent_area, false);
+        let rows = (body.y..body.y + body.height)
+            .map(|row| row_text(buffer, row, body.width))
+            .collect::<Vec<_>>();
+
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("Contextivity backlog") && row.contains("T3")));
+        assert!(rows.iter().any(|row| row.contains("ACTIVE · 1 working")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("contextivity-stack · 1")));
+        assert!(rows.iter().any(|row| row.contains("#280 remaining")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("WORKING · codex-cli · ai-dev-w1")));
+        assert!(rows
+            .iter()
+            .any(|row| row.contains("ctx-280c") && row.contains("feat-280c")));
+        assert!(rows
+            .iter()
+            .any(|row| row.starts_with('└') && row.ends_with('┘')));
+    }
+
+    #[test]
+    fn legacy_agent_panel_keeps_flat_rows_without_card_borders() {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("legacy");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+
+        let layout = orchestration_layout(&app, &agent_panel_entries(&app));
+        assert_eq!(layout.items.len(), 1);
+        assert!(matches!(
+            layout.items[0],
+            AgentPanelItem::LegacyAgent { entry_index: 0 }
+        ));
     }
 
     #[test]

@@ -10,7 +10,7 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::workspace_list_rect(sidebar, crate::ui::effective_sidebar_section_split(self))
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
@@ -18,8 +18,10 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+            sidebar,
+            crate::ui::effective_sidebar_section_split(self),
+        );
         detail_area
     }
 
@@ -273,12 +275,14 @@ impl AppState {
     }
 
     pub(super) fn on_sidebar_section_divider(&self, col: u16, row: u16) -> bool {
-        if self.sidebar_collapsed {
+        if self.sidebar_collapsed
+            || crate::ui::effective_sidebar_section_split(self) != self.sidebar_section_split
+        {
             return false;
         }
         let rect = crate::ui::sidebar_section_divider_rect(
             self.view.sidebar_rect,
-            self.sidebar_section_split,
+            crate::ui::effective_sidebar_section_split(self),
         );
         rect.width > 0
             && col >= rect.x
@@ -472,7 +476,7 @@ impl AppState {
 
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
-            self.sidebar_section_split,
+            crate::ui::effective_sidebar_section_split(self),
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0
@@ -491,33 +495,21 @@ impl AppState {
         }
 
         let detail_area = self.agent_panel_rect();
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let body = crate::ui::agent_panel_body_rect(
-            detail_area,
-            crate::ui::should_show_scrollbar(metrics),
-        );
-        if body.height == 0 || row < body.y || row >= body.y + body.height {
+        let entries = crate::ui::agent_panel_entries(self);
+        let item = crate::ui::agent_panel_item_at_row(self, detail_area, row)?;
+        let entry_index = item.entry_index()?;
+        entries
+            .get(entry_index)
+            .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+    }
+
+    pub(super) fn orchestration_card_at_row(&self, row: u16) -> Option<String> {
+        if self.sidebar_collapsed {
             return None;
         }
-
-        let mut row_y = body.y;
-        let body_bottom = body.y + body.height;
-        let entries = crate::ui::agent_panel_entries(self);
-        let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
-            if row_y.saturating_add(height) > body_bottom {
-                break;
-            }
-            if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y
-                .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
-                .min(body_bottom);
-        }
-        None
+        let item = crate::ui::agent_panel_item_at_row(self, self.agent_panel_rect(), row)?;
+        item.orchestration_id()
+            .map(crate::ui::orchestration_collapse_key)
     }
 }
 
@@ -841,6 +833,96 @@ mod tests {
             app.state.agent_detail_target_at(body.y),
             Some((0, 0, first_pane))
         );
+    }
+
+    #[test]
+    fn orchestration_sidebar_interaction_targets_cards_and_agents() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("proxy");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("orchestration_id".into(), Some("run-1".into())),
+                ("orchestration_label".into(), Some("Backlog wave".into())),
+                ("repository".into(), Some("stack".into())),
+                ("responsibility".into(), Some("Review issue".into())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        let panel = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, panel);
+        let body =
+            crate::ui::agent_panel_body_rect(panel, crate::ui::should_show_scrollbar(metrics));
+
+        assert_eq!(
+            app.state.orchestration_card_at_row(body.y).as_deref(),
+            Some("orchestration:run-1")
+        );
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 3),
+            Some((0, 0, pane_id))
+        );
+
+        app.state
+            .collapsed_space_keys
+            .insert("orchestration:run-1".into());
+        assert_eq!(app.state.agent_detail_target_at(body.y + 3), None);
+    }
+
+    #[test]
+    fn orchestration_sidebar_interaction_click_toggles_card() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("proxy");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.mode = Mode::Terminal;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Pi);
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([
+                ("orchestration_id".into(), Some("run-1".into())),
+                ("orchestration_label".into(), Some("Backlog wave".into())),
+                ("repository".into(), Some("stack".into())),
+            ]),
+            None,
+            std::time::Instant::now(),
+        );
+        let panel = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, panel);
+        let body =
+            crate::ui::agent_panel_body_rect(panel, crate::ui::should_show_scrollbar(metrics));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y,
+        ));
+        assert!(app
+            .state
+            .collapsed_space_keys
+            .contains("orchestration:run-1"));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y,
+        ));
+        assert!(!app
+            .state
+            .collapsed_space_keys
+            .contains("orchestration:run-1"));
     }
 
     #[test]

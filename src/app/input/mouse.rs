@@ -610,6 +610,17 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some(key) = self.orchestration_card_at_row(mouse.row) {
+                        if self.collapsed_space_keys.contains(&key) {
+                            self.collapsed_space_keys.remove(&key);
+                        } else {
+                            self.collapsed_space_keys.insert(key);
+                        }
+                        self.agent_panel_scroll = 0;
+                        self.mark_session_dirty();
+                        return None;
+                    }
+
                     if let Some(target) =
                         self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
                     {

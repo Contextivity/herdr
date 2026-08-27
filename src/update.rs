@@ -23,7 +23,8 @@ use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
+const PREVIEW_UPDATE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/Contextivity/herdr/master/website/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
@@ -2635,6 +2636,14 @@ mod tests {
         assert!(preview_channel_rejection_for_exe_path(nix)
             .is_some_and(|message| message.contains("Nix")));
         assert!(preview_channel_rejection_for_exe_path(direct).is_none());
+    }
+
+    #[test]
+    fn contextivity_preview_manifest_tracks_private_fork() {
+        assert_eq!(
+            PREVIEW_UPDATE_MANIFEST_URL,
+            "https://raw.githubusercontent.com/Contextivity/herdr/master/website/preview.json"
+        );
     }
 
     #[test]

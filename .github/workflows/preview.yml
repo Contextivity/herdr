@@ -329,6 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/preview.py notes \
+            --repo "$GITHUB_REPOSITORY" \
             --previous '${{ steps.previous-preview.outputs.range_base }}' \
             --commit '${{ needs.preflight.outputs.commit }}' \
             --build-id '${{ needs.preflight.outputs.build_id }}' \
@@ -419,6 +420,7 @@ jobs:
         run: |
           node website/scripts/docs-preview.mjs snapshot '${{ needs.preflight.outputs.commit }}'
           python3 scripts/preview.py manifest \
+            --repo "$GITHUB_REPOSITORY" \
             --output website/preview.json \
             --tag '${{ needs.preflight.outputs.tag }}' \
             --build-id '${{ needs.preflight.outputs.build_id }}' \
@@ -433,13 +435,13 @@ jobs:
 
       - name: Commit preview publication
         env:
-          KANGAL_GITHUB_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "kangal-bot"
           git config user.email "285672167+kangal-bot@users.noreply.github.com"
           git add -A docs/preview website/preview.json
           git diff --cached --quiet || git commit -m "docs: publish preview documentation"
-          remote="https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           for attempt in 1 2 3; do
             git pull --rebase "$remote" master
             node website/scripts/docs-preview.mjs check
@@ -471,7 +473,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PREVIEW_RELEASED_LABEL: preview-released
         run: |
           set -euo pipefail
