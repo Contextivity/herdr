@@ -3329,7 +3329,7 @@ mod tests {
         let mut app = test_app();
         // Default bounds.
         assert_eq!(app.state.sidebar_min_width, 18);
-        assert_eq!(app.state.sidebar_max_width, 36);
+        assert_eq!(app.state.sidebar_max_width, 72);
         assert_eq!(
             app.state.mobile_width_threshold,
             crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD
