@@ -242,10 +242,7 @@ fn status(entry: &AgentPanelEntry) -> String {
 fn metadata_line(entry: &AgentPanelEntry) -> String {
     let state = status(entry).to_ascii_uppercase();
     if state == "DONE" {
-        return match entry.tokens.get("cleanup_age") {
-            Some(age) => format!("DONE · awaiting cleanup {age}"),
-            None => "DONE · awaiting cleanup".into(),
-        };
+        return "DONE · awaiting cleanup".into();
     }
     let harness = entry
         .tokens

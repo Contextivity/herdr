@@ -119,8 +119,8 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
-pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
-    let has_orchestration = app.workspaces.iter().any(|workspace| {
+pub(crate) fn has_orchestration_metadata(app: &AppState) -> bool {
+    app.workspaces.iter().any(|workspace| {
         workspace.tabs.iter().any(|tab| {
             tab.panes.values().any(|pane| {
                 app.terminals
@@ -130,8 +130,11 @@ pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
                     })
             })
         })
-    });
-    if has_orchestration {
+    })
+}
+
+pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
+    if has_orchestration_metadata(app) {
         0.15
     } else {
         app.sidebar_section_split
@@ -637,6 +640,42 @@ fn card_content_line(text: &str, width: u16) -> String {
     let text = truncate_end(text, inner);
     let gap = inner.saturating_sub(display_width(&text));
     format!("│{text}{}│", " ".repeat(gap))
+}
+
+fn card_agent_line(
+    icon: &str,
+    responsibility: &str,
+    width: u16,
+    row_style: Style,
+    icon_color: Color,
+    text_color: Color,
+    border_color: Color,
+) -> Line<'static> {
+    if width < 2 {
+        return Line::from(Span::styled(
+            truncate_end(icon, width as usize),
+            row_style.fg(icon_color),
+        ));
+    }
+    let inner = width.saturating_sub(2) as usize;
+    let icon_width = display_width(icon).min(inner);
+    let separator_width = usize::from(icon_width < inner);
+    let label_width = inner.saturating_sub(icon_width + separator_width);
+    let responsibility = truncate_end(responsibility, label_width);
+    let used = icon_width + separator_width + display_width(&responsibility);
+    let padding = inner.saturating_sub(used);
+
+    Line::from(vec![
+        Span::styled("│", row_style.fg(border_color)),
+        Span::styled(icon.to_string(), row_style.fg(icon_color)),
+        Span::styled(" ".repeat(separator_width), row_style.fg(text_color)),
+        Span::styled(
+            responsibility,
+            row_style.fg(text_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(padding), row_style.fg(text_color)),
+        Span::styled("│", row_style.fg(border_color)),
+    ])
 }
 
 fn card_divider_line(label: &str, width: u16) -> String {
@@ -1710,15 +1749,15 @@ fn render_agent_detail(
                 };
                 let status_color = state_label_color(detail.state, detail.seen, p);
                 frame.render_widget(
-                    Paragraph::new(card_content_line(
-                        &format!("{icon} {responsibility}"),
+                    Paragraph::new(card_agent_line(
+                        icon,
+                        responsibility,
                         body.width,
-                    ))
-                    .style(
-                        row_style
-                            .fg(if *selected { p.text } else { p.subtext0 })
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                        row_style.fg(if *selected { p.text } else { p.subtext0 }),
+                        status_color,
+                        if *selected { p.text } else { p.subtext0 },
+                        p.overlay0,
+                    )),
                     Rect::new(body.x, row_y, body.width, 1),
                 );
                 let metadata_color = if status == "done" {
@@ -2015,6 +2054,12 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.contains("ctx-280c") && row.contains("feat-280c")));
+        let agent_row = body.y + 3;
+        let dot_x = find_symbol_x(buffer, agent_row, body.width, "●");
+        assert_eq!(
+            buffer[(dot_x, agent_row)].style().fg,
+            Some(app.palette.yellow)
+        );
         assert!(rows
             .iter()
             .any(|row| row.starts_with('└') && row.ends_with('┘')));
