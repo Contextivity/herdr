@@ -2783,6 +2783,7 @@ impl HeadlessServer {
             Some(
                 ClientConnectionMode::TerminalAttach { .. }
                     | ClientConnectionMode::TerminalObserve { .. }
+                    | ClientConnectionMode::TerminalObserveResize { .. }
             )
         ) {
             self.send_to_client(
@@ -6758,6 +6759,13 @@ next_tab = ""
                     if terminal_id == &terminal_id_string
             ));
             assert!(server.terminal_attach_owners.is_empty());
+            assert_eq!(
+                terminal_stream_client_ids(&server.clients, &terminal_id_string),
+                vec![7]
+            );
+            assert!(render_targets(&server.clients, server.foreground_client_id)
+                .iter()
+                .any(|(client_id, _, _, _, _)| *client_id == 7));
             assert_eq!(
                 server
                     .app

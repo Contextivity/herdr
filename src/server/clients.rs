@@ -280,6 +280,9 @@ pub(crate) fn terminal_stream_client_ids(
             }
             | ClientConnectionMode::TerminalObserve {
                 terminal_id: attached,
+            }
+            | ClientConnectionMode::TerminalObserveResize {
+                terminal_id: attached,
             } if attached == terminal_id => Some(client_id),
             _ => None,
         })
@@ -299,6 +302,7 @@ pub(crate) fn render_targets(
                         client.mode,
                         ClientConnectionMode::TerminalAttach { .. }
                             | ClientConnectionMode::TerminalObserve { .. }
+                            | ClientConnectionMode::TerminalObserveResize { .. }
                     ))
         })
         .map(|(&client_id, client)| {
