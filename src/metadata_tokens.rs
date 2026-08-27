@@ -41,6 +41,10 @@ pub(crate) fn accept_sequence(
 }
 
 impl MetadataTokens {
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
     pub(crate) fn patch(
         &mut self,
         patch: HashMap<String, Option<String>>,

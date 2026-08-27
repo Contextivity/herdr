@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use super::windows_client_input_event_from_raw;
 #[cfg(windows)]
 use super::ClientLoopEvent;
+use crate::input::WindowsKeyRecord;
 
 #[cfg(windows)]
 pub(super) fn raw_console_reader_loop(
@@ -162,16 +163,6 @@ enum WindowsInputRecord {
     Key(WindowsKeyRecord),
     Mouse(WindowsMouseRecord),
     Focus(bool),
-}
-
-#[derive(Clone, Copy, Debug)]
-struct WindowsKeyRecord {
-    key_down: bool,
-    repeat_count: u16,
-    virtual_key_code: u16,
-    virtual_scan_code: u16,
-    unicode: u16,
-    control_key_state: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -502,6 +493,10 @@ impl WindowsInputMapper {
             return Some(vec![0x1b]);
         }
 
+        if record.virtual_scan_code != 0 {
+            return None;
+        }
+
         if !record.key_down
             || record.repeat_count.max(1) != 1
             || windows_key_modifiers(record.control_key_state).bits() != 0
@@ -550,6 +545,10 @@ impl WindowsInputMapper {
                 code,
                 modifiers: modifiers.bits(),
                 kind,
+                repeat_count: 1,
+
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             },
         ))
     }
@@ -574,6 +573,45 @@ impl WindowsInputMapper {
         }
 
         let is_alt_code = Self::is_alt_code(key);
+        let carries_native_record = key.repeat_count != 0
+            && key.virtual_key_code != 0
+            && key.virtual_key_code != 0x03
+            && !matches!(key.virtual_key_code, 0xe5 | 0xe7)
+            && !is_alt_code
+            && !(0xd800..=0xdfff).contains(&key.unicode);
+        if carries_native_record {
+            return self
+                .translate_semantic_key_event(key, Self::semantic_key_kind(key, is_alt_code, 0))
+                .map(|event| match event {
+                    crate::protocol::ClientInputEvent::Key {
+                        code,
+                        modifiers,
+                        kind,
+                        generated_text,
+                        ..
+                    } => {
+                        // Windows Unicode is the authoritative host-layout result. Plain and
+                        // AltGr characters already encode from `code`; Shift must remain on the
+                        // physical event, so carry its produced text separately.
+                        let shifted_text = key.key_down
+                            && modifiers == crossterm::event::KeyModifiers::SHIFT.bits();
+                        crate::protocol::ClientInputEvent::Key {
+                            code,
+                            modifiers,
+                            kind,
+                            repeat_count: key.repeat_count.max(1),
+                            generated_text: if shifted_text { generated_text } else { None },
+                            source: crate::protocol::ClientKeySource::WindowsConsole {
+                                record: key,
+                            },
+                        }
+                    }
+                    event => event,
+                })
+                .into_iter()
+                .collect();
+        }
+
         (0..key.repeat_count.max(1))
             .filter_map(|repeat_idx| {
                 self.translate_semantic_key_event(
@@ -625,7 +663,9 @@ impl WindowsInputMapper {
         if key.virtual_key_code == 0 {
             let codepoint = self.utf16_unit_to_char(key.unicode)?;
             if !codepoint.is_control() {
-                return Some(crate::protocol::ClientInputEvent::Text { codepoint });
+                return Some(crate::protocol::ClientInputEvent::TextCommit(
+                    codepoint.to_string(),
+                ));
             }
         }
         if modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
@@ -637,6 +677,10 @@ impl WindowsInputMapper {
                 code: crate::protocol::ClientKeyCode::Char('j'),
                 modifiers: modifiers.bits(),
                 kind,
+                repeat_count: 1,
+
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             });
         }
 
@@ -649,13 +693,19 @@ impl WindowsInputMapper {
             if key.unicode == 0 {
                 self.pending_high_surrogate = None;
             }
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                && !(0x30..=0x39).contains(&key.virtual_key_code)
+            {
                 if let Some(code) = windows_unicode_control_to_key_code(key.unicode) {
                     self.pending_high_surrogate = None;
                     return Some(crate::protocol::ClientInputEvent::Key {
                         code,
                         modifiers: modifiers.bits(),
                         kind,
+                        repeat_count: 1,
+
+                        generated_text: None,
+                        source: crate::protocol::ClientKeySource::Synthesized,
                     });
                 }
             }
@@ -667,10 +717,20 @@ impl WindowsInputMapper {
                 })
         };
 
-        code.map(|code| crate::protocol::ClientInputEvent::Key {
-            code,
-            modifiers: modifiers.bits(),
-            kind,
+        code.map(|code| {
+            let generated_text = matches!(code, crate::protocol::ClientKeyCode::Char(_))
+                .then(|| char::from_u32(key.unicode as u32))
+                .flatten()
+                .filter(|ch| !ch.is_control())
+                .map(|ch| ch.to_string());
+            crate::protocol::ClientInputEvent::Key {
+                code,
+                modifiers: modifiers.bits(),
+                kind,
+                repeat_count: 1,
+                generated_text,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }
         })
     }
 
@@ -1063,7 +1123,7 @@ mod tests {
             key_down: true,
             repeat_count,
             virtual_key_code: vk,
-            virtual_scan_code: 0,
+            virtual_scan_code: 1,
             unicode: 0,
             control_key_state: 0,
         })
@@ -1113,6 +1173,38 @@ mod tests {
     }
 
     fn translate(
+        records: impl IntoIterator<Item = WindowsInputRecord>,
+    ) -> Vec<crate::protocol::ClientInputEvent> {
+        semantic_only(translate_with_provenance(records))
+    }
+
+    fn semantic_only(
+        events: impl IntoIterator<Item = crate::protocol::ClientInputEvent>,
+    ) -> Vec<crate::protocol::ClientInputEvent> {
+        events
+            .into_iter()
+            .map(|event| match event {
+                crate::protocol::ClientInputEvent::Key {
+                    code,
+                    modifiers,
+                    kind,
+                    repeat_count,
+                    generated_text,
+                    ..
+                } => crate::protocol::ClientInputEvent::Key {
+                    code,
+                    modifiers,
+                    kind,
+                    repeat_count,
+                    generated_text,
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                },
+                event => event,
+            })
+            .collect()
+    }
+
+    fn translate_with_provenance(
         records: impl IntoIterator<Item = WindowsInputRecord>,
     ) -> Vec<crate::protocol::ClientInputEvent> {
         let mut translator = WindowsInputTranslator::default();
@@ -1237,10 +1329,20 @@ mod tests {
                 control_key_state,
             });
 
-            assert_eq!(
-                translate(records),
-                vec![crate::protocol::ClientInputEvent::Text { codepoint: '你' }]
-            );
+            let events = translate(records);
+            match events.as_slice() {
+                [crate::protocol::ClientInputEvent::TextCommit(text)] => {
+                    assert_eq!(text, "你");
+                }
+                [crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('你'),
+                    repeat_count: 1,
+                    generated_text: Some(text),
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                    ..
+                }] => assert_eq!(text, "你"),
+                other => panic!("unexpected VK=0 result: {other:?}"),
+            }
         }
     }
 
@@ -1292,6 +1394,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('c'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1304,6 +1410,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('j'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1328,12 +1438,13 @@ mod tests {
     }
 
     #[test]
-    fn vti_real_non_letter_control_records_are_preserved() {
+    fn vti_control_records_keep_physical_digit_identity() {
         let cases = [
             (0x20, 0x00, ' '),
+            (0x31, 0x00, '1'),
             (0xdc, 0x1c, '\\'),
             (0xdd, 0x1d, ']'),
-            (0x36, 0x1e, '^'),
+            (0x36, 0x1e, '6'),
             (0xbd, 0x1f, '-'),
         ];
 
@@ -1344,6 +1455,10 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Char(expected),
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 }],
                 "vk={vk:#x} unicode={unicode:#x}"
             );
@@ -1362,6 +1477,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt { bytes: vec![0x1b] },
             }]
         );
     }
@@ -1378,45 +1497,84 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt { bytes: vec![0x1b] },
             }]
         );
     }
 
     #[test]
     fn vti_physical_escape_key_record_is_immediately_semantic() {
-        let mut translator = WindowsInputTranslator::default();
+        let record = WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0x1b,
+            virtual_scan_code: 0x01,
+            unicode: 0x1b,
+            control_key_state: 0,
+        };
         assert_eq!(
-            translator.translate(key_vk_with_scan_unicode(0x1b, 0x01, '\x1b', 0)),
+            translate_with_provenance([WindowsInputRecord::Key(record)]),
             vec![crate::protocol::ClientInputEvent::Key {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::WindowsConsole { record },
             }]
         );
     }
 
     #[test]
-    fn vti_repeated_escape_record_stays_semantic() {
+    fn vti_grouped_escape_down_and_up_keep_native_ownership_record() {
+        use crate::protocol::ClientKeyKind::{Press, Release};
+
+        let events = translate_with_provenance([
+            key_vk_with_repeat(0x1b, 3),
+            key_vk_up_with_scan_unicode(0x1b, 1, '\0', 0),
+        ]);
+
         assert_eq!(
-            translate([key_vk_with_repeat(0x1b, 3)]),
-            vec![
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Esc,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Press,
-                },
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Esc,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Repeat,
-                },
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Esc,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Repeat,
-                },
-            ]
+            events
+                .iter()
+                .map(|event| match event {
+                    crate::protocol::ClientInputEvent::Key {
+                        code: crate::protocol::ClientKeyCode::Esc,
+                        kind,
+                        repeat_count,
+                        source: crate::protocol::ClientKeySource::WindowsConsole { record },
+                        ..
+                    } => (*kind, *repeat_count, record.key_down, record.repeat_count),
+                    event => panic!("unexpected grouped event: {event:?}"),
+                })
+                .collect::<Vec<_>>(),
+            [(Press, 3, true, 3), (Release, 1, false, 1)]
         );
+    }
+
+    #[test]
+    fn vti_ctrl_break_record_keeps_semantic_path() {
+        assert!(matches!(
+            translate_with_provenance([key_vk(0x03, 0x0008)]).as_slice(),
+            [crate::protocol::ClientInputEvent::Key { .. }]
+        ));
+    }
+
+    #[test]
+    fn vti_ime_virtual_keys_keep_semantic_path() {
+        for vk in [0xe5, 0xe7] {
+            assert!(matches!(
+                translate_with_provenance([key_vk_with_unicode(vk, 'é', 0)]).as_slice(),
+                [crate::protocol::ClientInputEvent::Key {
+                    generated_text: Some(text),
+                    source: crate::protocol::ClientKeySource::Synthesized,
+                    ..
+                }] if text == "é"
+            ));
+        }
     }
 
     #[test]
@@ -1427,6 +1585,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1445,6 +1607,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Enter,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1453,23 +1619,14 @@ mod tests {
     fn vti_repeated_virtual_key_records_emit_repeats() {
         assert_eq!(
             translate([key_vk_with_repeat(0x08, 3)]),
-            vec![
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Backspace,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Press,
-                },
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Backspace,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Repeat,
-                },
-                crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Backspace,
-                    modifiers: 0,
-                    kind: crate::protocol::ClientKeyKind::Repeat,
-                },
-            ]
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Backspace,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 3,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }]
         );
     }
 
@@ -1481,6 +1638,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Enter,
                 modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1493,6 +1654,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('j'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                 kind: crate::protocol::ClientKeyKind::Release,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1505,6 +1670,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Enter,
                 modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1518,16 +1687,28 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Repeat,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Repeat,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1589,11 +1770,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1612,11 +1801,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1633,11 +1830,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Backspace,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Backspace,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1656,11 +1861,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Char('j'),
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Char('j'),
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1678,11 +1891,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Char('j'),
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Char('j'),
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1700,33 +1921,296 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                     kind: crate::protocol::ClientKeyKind::Release,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
     }
 
     #[test]
-    fn vti_win32_input_mode_printable_key_becomes_char() {
-        let records = "\x1b[65;30;97;1;0;1_\x1b[65;30;97;0;0;1_"
-            .chars()
-            .map(key_char);
-
+    fn vti_special_key_does_not_emit_incidental_printable_text() {
         assert_eq!(
-            translate(records),
+            translate_with_provenance([WindowsInputRecord::Key(WindowsKeyRecord {
+                key_down: true,
+                repeat_count: 0,
+                virtual_key_code: 0x0d,
+                virtual_scan_code: 0,
+                unicode: b'a'.into(),
+                control_key_state: 0,
+            })]),
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Enter,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_win32_input_mode_printable_keys_preserve_physical_records() {
+        assert_eq!(
+            translate(win32_input_mode_encoded_record(WindowsKeyRecord {
+                key_down: true,
+                repeat_count: 1,
+                virtual_key_code: 0,
+                virtual_scan_code: 0,
+                unicode: b'a'.into(),
+                control_key_state: 0,
+            })),
+            vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('a'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: Some("a".into()),
+                source: crate::protocol::ClientKeySource::Synthesized,
+            }]
+        );
+
+        use crate::protocol::ClientKeyKind::{Press, Release};
+        for repeat_count in [1, 3] {
+            let mut records = win32_input_mode_encoded_record(WindowsKeyRecord {
+                key_down: true,
+                repeat_count,
+                virtual_key_code: 0x41,
+                virtual_scan_code: 30,
+                unicode: b'a'.into(),
+                control_key_state: 0,
+            });
+            records.extend(win32_input_mode_encoded_record(WindowsKeyRecord {
+                key_down: false,
+                repeat_count: 1,
+                virtual_key_code: 0x41,
+                virtual_scan_code: 30,
+                unicode: b'a'.into(),
+                control_key_state: 0,
+            }));
+
+            assert_eq!(
+                translate_with_provenance(records)
+                    .iter()
+                    .map(|event| match event {
+                        crate::protocol::ClientInputEvent::Key {
+                            code: crate::protocol::ClientKeyCode::Char('a'),
+                            modifiers: 0,
+                            kind,
+                            repeat_count: event_repeat_count,
+                            generated_text: None,
+                            source:
+                                crate::protocol::ClientKeySource::WindowsConsole {
+                                    record:
+                                        WindowsKeyRecord {
+                                            repeat_count: record_repeat_count,
+                                            virtual_key_code: 0x41,
+                                            virtual_scan_code: 30,
+                                            unicode,
+                                            control_key_state: 0,
+                                            key_down,
+                                        },
+                                },
+                        } if *unicode == u16::from(b'a') => {
+                            (*kind, *event_repeat_count, *key_down, *record_repeat_count)
+                        }
+                        event => panic!("unexpected printable key event: {event:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                [
+                    (Press, repeat_count, true, repeat_count),
+                    (Release, 1, false, 1)
+                ],
+                "repeat_count={repeat_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn vti_win32_input_mode_non_us_shifted_text_preserves_generated_text() {
+        let pressed = WindowsKeyRecord {
+            key_down: true,
+            repeat_count: 1,
+            virtual_key_code: 0x37,
+            virtual_scan_code: 0x08,
+            unicode: b'/'.into(),
+            control_key_state: 0x0010,
+        };
+        let released = WindowsKeyRecord {
+            key_down: false,
+            ..pressed
+        };
+        let mut records = win32_input_mode_encoded_record(pressed);
+        records.extend(win32_input_mode_encoded_record(released));
+
+        let events = translate_with_provenance(records);
+        assert_eq!(
+            events,
             vec![
-                crate::protocol::ClientInputEvent::Text { codepoint: 'a' },
                 crate::protocol::ClientInputEvent::Key {
-                    code: crate::protocol::ClientKeyCode::Char('a'),
-                    modifiers: 0,
+                    code: crate::protocol::ClientKeyCode::Char('/'),
+                    modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
+                    kind: crate::protocol::ClientKeyKind::Press,
+                    repeat_count: 1,
+                    generated_text: Some("/".into()),
+                    source: crate::protocol::ClientKeySource::WindowsConsole { record: pressed },
+                },
+                crate::protocol::ClientInputEvent::Key {
+                    code: crate::protocol::ClientKeyCode::Char('/'),
+                    modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Release,
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::WindowsConsole { record: released },
                 },
             ]
         );
+
+        let crate::raw_input::RawInputEvent::Key(key) = events[0].to_raw_input_event() else {
+            panic!("expected translated key");
+        };
+        assert_eq!(
+            crate::input::encode_terminal_key(key.clone(), crate::input::KeyboardProtocol::Legacy),
+            b"/"
+        );
+        assert_eq!(
+            crate::input::encode_terminal_key(
+                key.clone(),
+                crate::input::KeyboardProtocol::Kitty { flags: 7 },
+            ),
+            b"/"
+        );
+        assert_eq!(
+            crate::input::encode_terminal_key(
+                key,
+                crate::input::KeyboardProtocol::Kitty { flags: 15 },
+            ),
+            b"\x1b[47;2:1u"
+        );
+    }
+
+    #[test]
+    fn vti_native_layout_text_and_command_modifiers_encode_by_role() {
+        let cases = [
+            (
+                "plain unicode",
+                0x4c,
+                0x26,
+                'λ' as u16,
+                0,
+                0,
+                None,
+                "λ".as_bytes(),
+            ),
+            (
+                "shifted latin",
+                0x41,
+                0x1e,
+                'A' as u16,
+                0x0010,
+                crossterm::event::KeyModifiers::SHIFT.bits(),
+                Some("A"),
+                b"A".as_slice(),
+            ),
+            (
+                "shifted non-ascii",
+                0x4c,
+                0x26,
+                'Λ' as u16,
+                0x0010,
+                crossterm::event::KeyModifiers::SHIFT.bits(),
+                Some("Λ"),
+                "Λ".as_bytes(),
+            ),
+            (
+                "altgr",
+                0x45,
+                0x12,
+                '€' as u16,
+                0x0009,
+                0,
+                None,
+                "€".as_bytes(),
+            ),
+            (
+                "shift altgr",
+                0x37,
+                0x08,
+                '{' as u16,
+                0x0019,
+                crossterm::event::KeyModifiers::SHIFT.bits(),
+                Some("{"),
+                b"{".as_slice(),
+            ),
+            (
+                "left alt command",
+                0x41,
+                0x1e,
+                'a' as u16,
+                0x0002,
+                crossterm::event::KeyModifiers::ALT.bits(),
+                None,
+                b"\x1ba".as_slice(),
+            ),
+            (
+                "control command",
+                0x41,
+                0x1e,
+                0x01,
+                0x0008,
+                crossterm::event::KeyModifiers::CONTROL.bits(),
+                None,
+                b"\x01".as_slice(),
+            ),
+        ];
+
+        for (
+            name,
+            virtual_key_code,
+            virtual_scan_code,
+            unicode,
+            state,
+            modifiers,
+            text,
+            expected,
+        ) in cases
+        {
+            let events =
+                translate_with_provenance(win32_input_mode_encoded_record(WindowsKeyRecord {
+                    key_down: true,
+                    repeat_count: 1,
+                    virtual_key_code,
+                    virtual_scan_code,
+                    unicode,
+                    control_key_state: state,
+                }));
+            let [event] = events.as_slice() else {
+                panic!("{name}: expected one translated event, got {events:?}");
+            };
+            let crate::raw_input::RawInputEvent::Key(key) = event.to_raw_input_event() else {
+                panic!("{name}: expected translated key");
+            };
+
+            assert_eq!(key.modifiers.bits(), modifiers, "{name}: modifiers");
+            assert_eq!(key.generated_text.as_deref(), text, "{name}: text");
+            assert_eq!(
+                crate::input::encode_terminal_key(key, crate::input::KeyboardProtocol::Legacy),
+                expected,
+                "{name}: encoding"
+            );
+        }
     }
 
     #[test]
@@ -1817,20 +2301,33 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::WindowsConsole {
+                    record: WindowsKeyRecord {
+                        key_down: true,
+                        repeat_count: 1,
+                        virtual_key_code: 0x1b,
+                        virtual_scan_code: 0x02,
+                        unicode: 0,
+                        control_key_state: 0,
+                    }
+                },
             }]
         );
     }
 
     #[test]
     fn vti_win32_input_mode_physical_escape_is_immediately_semantic() {
-        let records = win32_input_mode_encoded_record(WindowsKeyRecord {
+        let record = WindowsKeyRecord {
             key_down: true,
             repeat_count: 1,
             virtual_key_code: 0x1b,
             virtual_scan_code: 0x01,
             unicode: 0x1b,
             control_key_state: 0,
-        });
+        };
+        let records = win32_input_mode_encoded_record(record);
         let mut translator = WindowsInputTranslator::default();
 
         assert_eq!(
@@ -1842,6 +2339,9 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::WindowsConsole { record },
             }]
         );
     }
@@ -1868,6 +2368,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Up,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1882,6 +2386,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Esc,
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Vt { bytes: vec![0x1b] },
             }]
         );
     }
@@ -1897,11 +2405,19 @@ mod tests {
                     code: crate::protocol::ClientKeyCode::Esc,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Vt { bytes: vec![0x1b] },
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Enter,
                     modifiers: crossterm::event::KeyModifiers::SHIFT.bits(),
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1912,17 +2428,25 @@ mod tests {
         let mut translator = WindowsInputTranslator::default();
         assert!(translator.translate(key_char('\x1b')).is_empty());
         assert_eq!(
-            translator.translate(key_vk(0x26, 0)),
+            semantic_only(translator.translate(key_vk(0x26, 0))),
             vec![
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Esc,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
                 crate::protocol::ClientInputEvent::Key {
                     code: crate::protocol::ClientKeyCode::Up,
                     modifiers: 0,
                     kind: crate::protocol::ClientKeyKind::Press,
+
+                    repeat_count: 1,
+                    generated_text: None,
+                    source: crate::protocol::ClientKeySource::Synthesized,
                 },
             ]
         );
@@ -1936,6 +2460,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('c'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1948,6 +2476,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Up,
                 modifiers: crossterm::event::KeyModifiers::ALT.bits(),
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1960,6 +2492,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('@'),
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1972,6 +2508,9 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('é'),
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text: Some("é".into()),
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }
@@ -1989,6 +2528,10 @@ mod tests {
                 code: crate::protocol::ClientKeyCode::Char('🙂'),
                 modifiers: 0,
                 kind: crate::protocol::ClientKeyKind::Press,
+
+                repeat_count: 1,
+                generated_text: None,
+                source: crate::protocol::ClientKeySource::Synthesized,
             }]
         );
     }

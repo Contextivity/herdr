@@ -4,6 +4,7 @@ use std::{
     os::fd::RawFd,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::OnceLock,
 };
 
 use super::{
@@ -11,7 +12,23 @@ use super::{
     LimitedRead, Signal,
 };
 
+pub(crate) use super::unix_common::{
+    configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
+    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
+    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
+    remote_ssh_config_paths, set_default_plugin_pane_pwd, status_commands_supported,
+    StatusCommandGuard,
+};
+
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
+const PROCESS_DETECTION_ENV_VAR: &str = "HERDR_PROCESS_DETECTION";
+const CHILD_GROUPS_SCAN_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessDetectionMode {
+    Native,
+    ChildGroups,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcGroupMember {
@@ -23,6 +40,10 @@ pub fn raise_server_nofile_limit() {}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     running_inside_wsl()
+}
+
+pub(crate) fn should_query_host_terminal_palette() -> bool {
+    !running_inside_wsl()
 }
 
 fn running_inside_wsl() -> bool {
@@ -43,6 +64,29 @@ fn proc_file_indicates_wsl(path: &str) -> bool {
 fn text_indicates_wsl(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
     text.contains("microsoft") || text.contains("wsl")
+}
+
+fn parse_process_detection_mode(value: Option<&str>) -> Result<ProcessDetectionMode, &str> {
+    match value {
+        None | Some("") | Some("native") => Ok(ProcessDetectionMode::Native),
+        Some("child-groups") => Ok(ProcessDetectionMode::ChildGroups),
+        Some(value) => Err(value),
+    }
+}
+
+fn process_detection_mode() -> ProcessDetectionMode {
+    static MODE: OnceLock<ProcessDetectionMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let value = std::env::var(PROCESS_DETECTION_ENV_VAR).ok();
+        parse_process_detection_mode(value.as_deref()).unwrap_or_else(|value| {
+            tracing::warn!(
+                variable = PROCESS_DETECTION_ENV_VAR,
+                %value,
+                "unknown process detection mode; using native detection"
+            );
+            ProcessDetectionMode::Native
+        })
+    })
 }
 
 fn raw_command_argv(command: &str, flag: &str) -> Vec<std::ffi::OsString> {
@@ -96,8 +140,19 @@ pub(crate) fn available_pane_shell(child_pid: u32) -> Option<String> {
 }
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
-    let tpgid = foreground_process_group_id(child_pid)?;
-    let members = foreground_process_group_members(child_pid, tpgid)?;
+    if let Some(tpgid) = foreground_process_group_id(child_pid) {
+        return foreground_job_for_group(child_pid, tpgid);
+    }
+
+    if process_detection_mode() != ProcessDetectionMode::ChildGroups {
+        return None;
+    }
+
+    foreground_job_for_group(child_pid, child_groups_foreground_process_group(child_pid)?)
+}
+
+fn foreground_job_for_group(child_pid: u32, process_group_id: u32) -> Option<ForegroundJob> {
+    let members = foreground_process_group_members(child_pid, process_group_id)?;
     let processes = members
         .into_iter()
         .map(|member| {
@@ -117,9 +172,58 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     }
 
     Some(ForegroundJob {
-        process_group_id: tpgid,
+        process_group_id,
         processes,
     })
+}
+
+/// Best-effort foreground group for environments that do not expose terminal
+/// foreground groups. This mode is explicit because background jobs cannot be
+/// distinguished from foreground jobs without the native terminal signal.
+fn child_groups_foreground_process_group(child_pid: u32) -> Option<u32> {
+    let shell_group_id = process_pgrp_and_comm(child_pid)
+        .map(|(pgrp, _)| pgrp)
+        .filter(|pgrp| *pgrp > 0)? as u32;
+
+    child_groups_foreground_process_group_with(
+        child_pid,
+        shell_group_id,
+        process_task_ids,
+        process_task_children,
+        |pid| process_pgrp_and_comm(pid).map(|(pgrp, _)| pgrp),
+    )
+}
+
+fn child_groups_foreground_process_group_with(
+    child_pid: u32,
+    shell_group_id: u32,
+    mut task_ids: impl FnMut(u32) -> Vec<u32>,
+    mut task_children: impl FnMut(u32, u32) -> Vec<u32>,
+    mut process_group_id: impl FnMut(u32) -> Option<i32>,
+) -> Option<u32> {
+    let mut newest = None;
+    let mut scanned = 0usize;
+    for tid in task_ids(child_pid) {
+        for child in task_children(child_pid, tid) {
+            if scanned >= CHILD_GROUPS_SCAN_LIMIT {
+                return None;
+            }
+            scanned += 1;
+
+            let Some(pgrp) = process_group_id(child) else {
+                continue;
+            };
+            if pgrp <= 0 {
+                continue;
+            }
+            let pgrp = pgrp as u32;
+            if pgrp == shell_group_id {
+                continue;
+            }
+            newest = Some(newest.map_or(pgrp, |current: u32| current.max(pgrp)));
+        }
+    }
+    newest.or(Some(shell_group_id))
 }
 
 fn foreground_process_group_members(
@@ -363,14 +467,14 @@ pub fn read_clipboard_text() -> Option<String> {
     None
 }
 
-pub fn open_url(url: &str) -> std::io::Result<()> {
+pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
     Command::new("xdg-open")
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
+        .spawn()
+        .map(Some)
 }
 
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
@@ -636,7 +740,62 @@ fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     }
     drop(stdin);
 
+    if command.program == "wl-copy" {
+        return wait_for_wl_copy_startup(child);
+    }
+
     child.wait().map(|status| status.success()).unwrap_or(false)
+}
+
+fn wait_for_wl_copy_startup(mut child: std::process::Child) -> bool {
+    const STARTUP_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+    let deadline = std::time::Instant::now() + STARTUP_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Ok(None) => return detach_clipboard_owner(child),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn detach_clipboard_owner(child: std::process::Child) -> bool {
+    let pid = child.id();
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let reaper_child = std::sync::Arc::clone(&child);
+    let reaper = std::thread::Builder::new()
+        .name("herdr-wl-copy-reaper".to_string())
+        .spawn(move || {
+            let wait_result = match reaper_child.lock() {
+                Ok(mut child) => child.wait(),
+                Err(poisoned) => poisoned.into_inner().wait(),
+            };
+            if let Err(err) = wait_result {
+                tracing::warn!(pid, %err, "failed to reap wl-copy clipboard owner");
+            }
+        });
+
+    if let Err(err) = reaper {
+        tracing::warn!(pid, %err, "failed to start wl-copy clipboard owner reaper");
+        let mut child = match child.lock() {
+            Ok(child) => child,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        return false;
+    }
+
+    true
 }
 
 fn process_session_id(pid: u32) -> Option<i32> {
@@ -663,6 +822,98 @@ mod tests {
         assert!(text_indicates_wsl("4.4.0-19041-Microsoft"));
         assert!(!text_indicates_wsl("6.8.0-64-generic"));
         assert!(!text_indicates_wsl(""));
+    }
+
+    #[test]
+    fn process_detection_mode_requires_explicit_child_groups_value() {
+        assert_eq!(
+            parse_process_detection_mode(None),
+            Ok(ProcessDetectionMode::Native)
+        );
+        assert_eq!(
+            parse_process_detection_mode(Some("")),
+            Ok(ProcessDetectionMode::Native)
+        );
+        assert_eq!(
+            parse_process_detection_mode(Some("native")),
+            Ok(ProcessDetectionMode::Native)
+        );
+        assert_eq!(
+            parse_process_detection_mode(Some("child-groups")),
+            Ok(ProcessDetectionMode::ChildGroups)
+        );
+        assert_eq!(parse_process_detection_mode(Some("gvisor")), Err("gvisor"));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_picks_the_newest_job() {
+        let tasks = HashMap::from([(100, vec![100])]);
+        let children = HashMap::from([((100, 100), vec![200, 300])]);
+        let groups = HashMap::from([(200, 200), (300, 300)]);
+
+        let group = child_groups_foreground_process_group_with(
+            100,
+            100,
+            |pid| tasks.get(&pid).cloned().unwrap_or_default(),
+            |pid, tid| children.get(&(pid, tid)).cloned().unwrap_or_default(),
+            |pid| groups.get(&pid).copied(),
+        );
+
+        assert_eq!(group, Some(300));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_returns_to_the_shell_group() {
+        let tasks = HashMap::from([(100, vec![100])]);
+        let children = HashMap::from([((100, 100), vec![150, 160])]);
+        let groups = HashMap::from([(150, 90), (160, 90)]);
+
+        let group = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |pid| tasks.get(&pid).cloned().unwrap_or_default(),
+            |pid, tid| children.get(&(pid, tid)).cloned().unwrap_or_default(),
+            |pid| groups.get(&pid).copied(),
+        );
+
+        assert_eq!(group, Some(90));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_skips_the_shell_group() {
+        let tasks = HashMap::from([(100, vec![100])]);
+        let children = HashMap::from([((100, 100), vec![150, 160, 300])]);
+        let groups = HashMap::from([(150, 90), (160, 90), (300, 300)]);
+
+        let group = child_groups_foreground_process_group_with(
+            100,
+            90,
+            |pid| tasks.get(&pid).cloned().unwrap_or_default(),
+            |pid, tid| children.get(&(pid, tid)).cloned().unwrap_or_default(),
+            |pid| groups.get(&pid).copied(),
+        );
+
+        assert_eq!(group, Some(300));
+    }
+
+    #[test]
+    fn child_groups_foreground_group_fails_closed_at_the_scan_limit() {
+        let children: Vec<u32> = (1..=(CHILD_GROUPS_SCAN_LIMIT as u32 + 10)).collect();
+        let mut inspected = 0usize;
+
+        let group = child_groups_foreground_process_group_with(
+            100,
+            100,
+            |_| vec![100],
+            |_, _| children.clone(),
+            |pid| {
+                inspected += 1;
+                Some(pid as i32)
+            },
+        );
+
+        assert_eq!(inspected, CHILD_GROUPS_SCAN_LIMIT);
+        assert_eq!(group, None);
     }
 
     #[test]
@@ -815,6 +1066,234 @@ mod tests {
         let commands = clipboard_commands();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].program, "wl-copy");
+    }
+
+    #[test]
+    fn wl_copy_owner_does_not_block_clipboard_write() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant, SystemTime};
+
+        struct Cleanup {
+            old_path: Option<OsString>,
+            temp_dir: PathBuf,
+            owner_pid: Option<i32>,
+        }
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(pid) = self.owner_pid {
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                }
+                unsafe {
+                    match self.old_path.take() {
+                        Some(path) => std::env::set_var("PATH", path),
+                        None => std::env::remove_var("PATH"),
+                    }
+                    std::env::remove_var("HERDR_TEST_WL_COPY_MARKER");
+                    std::env::remove_var("HERDR_TEST_WL_COPY_PAYLOAD");
+                    std::env::remove_var("HERDR_TEST_WL_COPY_ARGS");
+                }
+                let _ = std::fs::remove_dir_all(&self.temp_dir);
+            }
+        }
+
+        let _guard = env_lock().lock().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time should follow unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "herdr-fake-wl-copy-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let mut cleanup = Cleanup {
+            old_path: std::env::var_os("PATH"),
+            temp_dir: temp_dir.clone(),
+            owner_pid: None,
+        };
+        let fake_wl_copy = temp_dir.join("wl-copy");
+        let marker = temp_dir.join("owner-pid");
+        let payload = temp_dir.join("payload");
+        let args = temp_dir.join("args");
+        std::fs::write(
+            &fake_wl_copy,
+            "#!/bin/sh\ncat > \"$HERDR_TEST_WL_COPY_PAYLOAD\"\nprintf '%s\\n' \"$@\" > \"$HERDR_TEST_WL_COPY_ARGS\"\nprintf '%s' \"$$\" > \"$HERDR_TEST_WL_COPY_MARKER\"\nexec sleep 30\n",
+        )
+        .expect("fake wl-copy should be written");
+        let mut permissions = std::fs::metadata(&fake_wl_copy)
+            .expect("fake wl-copy metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&fake_wl_copy, permissions)
+            .expect("fake wl-copy should be executable");
+
+        let test_path = match cleanup.old_path.as_ref() {
+            Some(path) => {
+                let mut paths = vec![temp_dir.clone()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).expect("test path should be valid")
+            }
+            None => temp_dir.clone().into_os_string(),
+        };
+        unsafe {
+            std::env::set_var("PATH", test_path);
+            std::env::set_var("HERDR_TEST_WL_COPY_MARKER", &marker);
+            std::env::set_var("HERDR_TEST_WL_COPY_PAYLOAD", &payload);
+            std::env::set_var("HERDR_TEST_WL_COPY_ARGS", &args);
+        }
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let command = ClipboardCommand {
+                program: "wl-copy",
+                args: &["--type", "text/plain;charset=utf-8"],
+            };
+            let _ = result_tx.send(run_clipboard_command(&command, b"clipboard text"));
+        });
+
+        let marker_deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < marker_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let owner_pid: i32 = std::fs::read_to_string(&marker)
+            .expect("fake wl-copy should enter its clipboard-owner phase")
+            .parse()
+            .expect("owner pid should be numeric");
+        cleanup.owner_pid = Some(owner_pid);
+        let returned_while_owner_running = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .is_ok_and(|result| result);
+        let actual_payload = std::fs::read(&payload).expect("fake wl-copy should record stdin");
+        let actual_args = std::fs::read_to_string(&args).expect("fake wl-copy should record args");
+
+        unsafe {
+            libc::kill(owner_pid, libc::SIGTERM);
+        }
+        let reap_deadline = Instant::now() + Duration::from_secs(2);
+        while process_exists(owner_pid as u32) && Instant::now() < reap_deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let owner_was_reaped = !process_exists(owner_pid as u32);
+        cleanup.owner_pid = None;
+        writer.join().expect("clipboard writer thread should join");
+        drop(cleanup);
+
+        assert!(
+            returned_while_owner_running,
+            "clipboard writes must return while wl-copy remains alive to own the selection"
+        );
+        assert_eq!(actual_payload, b"clipboard text");
+        assert_eq!(actual_args, "--type\ntext/plain;charset=utf-8\n");
+        assert!(
+            owner_was_reaped,
+            "wl-copy owner should be reaped after exit"
+        );
+    }
+
+    #[test]
+    fn failed_wl_copy_uses_x11_fallback() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        struct Cleanup {
+            old_path: Option<OsString>,
+            old_wayland_display: Option<OsString>,
+            old_display: Option<OsString>,
+            temp_dir: PathBuf,
+        }
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.old_path.take() {
+                        Some(value) => std::env::set_var("PATH", value),
+                        None => std::env::remove_var("PATH"),
+                    }
+                    match self.old_wayland_display.take() {
+                        Some(value) => std::env::set_var("WAYLAND_DISPLAY", value),
+                        None => std::env::remove_var("WAYLAND_DISPLAY"),
+                    }
+                    match self.old_display.take() {
+                        Some(value) => std::env::set_var("DISPLAY", value),
+                        None => std::env::remove_var("DISPLAY"),
+                    }
+                    std::env::remove_var("HERDR_TEST_XCLIP_PAYLOAD");
+                }
+                let _ = std::fs::remove_dir_all(&self.temp_dir);
+            }
+        }
+
+        let _guard = env_lock().lock().unwrap();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should follow unix epoch")
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "herdr-failed-wl-copy-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let cleanup = Cleanup {
+            old_path: std::env::var_os("PATH"),
+            old_wayland_display: std::env::var_os("WAYLAND_DISPLAY"),
+            old_display: std::env::var_os("DISPLAY"),
+            temp_dir: temp_dir.clone(),
+        };
+        let payload = temp_dir.join("xclip-payload");
+        let fake_wl_copy = temp_dir.join("wl-copy");
+        let fake_xclip = temp_dir.join("xclip");
+        std::fs::write(&fake_wl_copy, "#!/bin/sh\n/bin/cat >/dev/null\nexit 7\n")
+            .expect("fake wl-copy should be written");
+        std::fs::write(
+            &fake_xclip,
+            "#!/bin/sh\n/bin/cat > \"$HERDR_TEST_XCLIP_PAYLOAD\"\n",
+        )
+        .expect("fake xclip should be written");
+        for command in [&fake_wl_copy, &fake_xclip] {
+            let mut permissions = std::fs::metadata(command)
+                .expect("fake clipboard command metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(command, permissions)
+                .expect("fake clipboard command should be executable");
+        }
+
+        unsafe {
+            std::env::set_var("PATH", &temp_dir);
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            std::env::set_var("DISPLAY", ":0");
+            std::env::set_var("HERDR_TEST_XCLIP_PAYLOAD", &payload);
+        }
+
+        assert!(write_clipboard(b"clipboard fallback"));
+        assert_eq!(
+            std::fs::read(&payload).expect("xclip should record stdin"),
+            b"clipboard fallback"
+        );
+        drop(cleanup);
+    }
+
+    #[test]
+    fn finite_clipboard_commands_report_exit_status() {
+        let success = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "cat >/dev/null"],
+        };
+        let failure = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "cat >/dev/null; exit 7"],
+        };
+
+        assert!(run_clipboard_command(&success, b"clipboard text"));
+        assert!(!run_clipboard_command(&failure, b"clipboard text"));
     }
 
     #[test]

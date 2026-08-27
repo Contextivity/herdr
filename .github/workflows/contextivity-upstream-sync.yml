@@ -1,0 +1,78 @@
+name: Contextivity upstream sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: contextivity-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Merge upstream into automation branch
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name contextivity-upstream-bot
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add upstream https://github.com/ogulcancelik/herdr.git
+          git fetch upstream master
+          git checkout -B automation/upstream-sync origin/master
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge --no-edit upstream/master; then
+            git merge --abort || true
+            title="Upstream sync conflict"
+            issue=$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')
+            body="The scheduled upstream sync could not merge ogulcancelik/herdr master into Contextivity/herdr master. Resolve the conflict on automation/upstream-sync, then rerun this workflow."
+            if [ -n "$issue" ]; then
+              gh issue comment "$issue" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+            exit 1
+          fi
+
+          git push --force-with-lease origin automation/upstream-sync
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open or refresh sync pull request
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --state open --head automation/upstream-sync --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            gh pr create \
+              --base master \
+              --head automation/upstream-sync \
+              --title "chore: sync upstream herdr" \
+              --body "Merge the latest ogulcancelik/herdr master into the Contextivity fork. The normal CI and orchestration-sidebar gates must pass before merge."
+          fi
+
+          if [ "${{ vars.AUTO_MERGE_UPSTREAM }}" = "true" ]; then
+            gh pr merge automation/upstream-sync --auto --merge
+          fi
