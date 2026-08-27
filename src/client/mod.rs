@@ -957,11 +957,54 @@ pub fn run_terminal_attach(_terminal_id: String, _takeover: bool) -> io::Result<
 }
 
 /// Runs a read-only terminal session observer and prints one JSON envelope per frame.
-pub fn run_terminal_session_observe(target: String, cols: u16, rows: u16) -> io::Result<()> {
+pub fn run_terminal_session_observe(
+    target: String,
+    cols: u16,
+    rows: u16,
+    resize_target: bool,
+) -> io::Result<()> {
     let mut stream =
         connect_terminal_session_stream(target.clone(), cols, rows, "observing terminal session")?;
-    write_to_server(&mut stream, &ClientMessage::ObserveTerminal { target })?;
+    let message = if resize_target {
+        ClientMessage::ObserveTerminalResize { target }
+    } else {
+        ClientMessage::ObserveTerminal { target }
+    };
+    write_to_server(&mut stream, &message)?;
+    if resize_target {
+        spawn_terminal_observe_resize_input(stream.try_clone()?);
+    }
     write_terminal_session_output(stream)
+}
+
+fn spawn_terminal_observe_resize_input(mut write_stream: LocalStream) {
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match terminal_control_command_from_json(&line) {
+                Ok(message @ ClientMessage::Resize { .. }) => {
+                    if write_to_server(&mut write_stream, &message).is_err() {
+                        return;
+                    }
+                }
+                Ok(ClientMessage::Detach) => {
+                    let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
+                    return;
+                }
+                Ok(_) => eprintln!(
+                    "herdr: terminal session observe input ignored: only terminal.resize is allowed"
+                ),
+                Err(err) => eprintln!("herdr: terminal session observe input ignored: {err}"),
+            }
+        }
+        let _ = write_to_server(&mut write_stream, &ClientMessage::Detach);
+    });
 }
 
 /// Runs a writable terminal session controller.

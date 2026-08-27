@@ -82,10 +82,9 @@ pub(crate) use self::{
         compute_workspace_card_areas, effective_sidebar_section_split, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, normalized_workspace_scroll, orchestration_collapse_key,
         sidebar_section_divider_rect, workspace_drop_slots, workspace_group_chevron_rect,
-        workspace_list_entries,
-        workspace_list_entries_expanded, workspace_list_rect, workspace_list_scroll_metrics,
-        workspace_list_scrollbar_rect, workspace_parent_group_state, AgentPanelEntry,
-        WorkspaceListEntry,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, WorkspaceListEntry,
     },
 };
 

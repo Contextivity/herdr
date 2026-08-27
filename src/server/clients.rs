@@ -10,6 +10,7 @@ pub(crate) enum ClientConnectionMode {
     App,
     TerminalAttach { terminal_id: String },
     TerminalObserve { terminal_id: String },
+    TerminalObserveResize { terminal_id: String },
 }
 
 pub(crate) type RenderTarget = (

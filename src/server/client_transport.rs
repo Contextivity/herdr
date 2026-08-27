@@ -363,6 +363,8 @@ pub(crate) enum ServerEvent {
     },
     /// A client requested read-only observation of one terminal.
     ClientObserveTerminal { client_id: u64, target: String },
+    /// A client requested observation that owns PTY geometry while no writer is attached.
+    ClientObserveTerminalResize { client_id: u64, target: String },
     /// A client requested writable control of one terminal.
     ClientControlTerminal {
         client_id: u64,
@@ -886,6 +888,9 @@ fn client_read_loop(
             },
             ClientMessage::ObserveTerminal { target } => {
                 ServerEvent::ClientObserveTerminal { client_id, target }
+            }
+            ClientMessage::ObserveTerminalResize { target } => {
+                ServerEvent::ClientObserveTerminalResize { client_id, target }
             }
             ClientMessage::ControlTerminal { target, takeover } => {
                 ServerEvent::ClientControlTerminal {

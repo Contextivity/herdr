@@ -120,10 +120,18 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
 }
 
 pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
-    if collect_agent_panel_entries_with_runtimes(app, None)
-        .iter()
-        .any(|entry| entry.tokens.contains_key("orchestration_id"))
-    {
+    let has_orchestration = app.workspaces.iter().any(|workspace| {
+        workspace.tabs.iter().any(|tab| {
+            tab.panes.values().any(|pane| {
+                app.terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| {
+                        terminal.metadata_tokens.contains_key("orchestration_id")
+                    })
+            })
+        })
+    });
+    if has_orchestration {
         0.15
     } else {
         app.sidebar_section_split
@@ -1759,8 +1767,7 @@ fn render_agent_detail(
                     Modifier::DIM
                 });
                 let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-                let state_icon =
-                    state_icon(detail.state, detail.seen, app.status_indicators, p);
+                let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
                 for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
                     let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
                     spans.extend(resolved_token_spans(

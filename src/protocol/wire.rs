@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -429,6 +429,12 @@ pub enum ClientMessage {
         target: String,
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
+    },
+
+    /// Observe a terminal and resize its PTY when no writable controller owns it.
+    ObserveTerminalResize {
+        /// Pane, terminal, or agent target to observe.
+        target: String,
     },
 
     /// Result of the one armed Herdr-owned direct Kitty transmission.
@@ -1132,6 +1138,12 @@ mod tests {
             }),
             9
         );
+        assert_eq!(
+            tag(&ClientMessage::ObserveTerminalResize {
+                target: "w1:p1".to_owned(),
+            }),
+            10
+        );
     }
 
     #[test]
@@ -1338,6 +1350,17 @@ mod tests {
     #[test]
     fn client_observe_terminal_roundtrip() {
         let msg = ClientMessage::ObserveTerminal {
+            target: "w1:p1".to_owned(),
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn client_observe_terminal_resize_roundtrip() {
+        let msg = ClientMessage::ObserveTerminalResize {
             target: "w1:p1".to_owned(),
         };
         let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
