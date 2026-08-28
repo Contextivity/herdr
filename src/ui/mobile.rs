@@ -33,7 +33,7 @@ pub(crate) struct MobileSwitcherAreas {
     pub viewport: Rect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     NewWorkspace,
     Workspace(usize),
@@ -43,6 +43,7 @@ pub(crate) enum MobileSwitcherTarget {
         ws_idx: usize,
         tab_idx: usize,
         pane_id: PaneId,
+        provider_target: Option<crate::api::schema::AgentProviderTarget>,
     },
     Menu(usize),
 }
@@ -160,6 +161,7 @@ pub(crate) fn mobile_switcher_target_at(
                     ws_idx: entry.ws_idx,
                     tab_idx: entry.tab_idx,
                     pane_id: entry.pane_id,
+                    provider_target: entry.provider_target.clone(),
                 });
             }
             cursor = agents_end;
@@ -530,9 +532,12 @@ fn render_mobile_switcher_content(
             doc_y += 1;
         }
         for entry in &entries {
-            let active = focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-                entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
-            });
+            let active = match entry.provider_target.as_ref() {
+                Some(target) => app.focused_provider_agent.as_ref() == Some(target),
+                None => focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
+                    entry.ws_idx == ws_idx && entry.tab_idx == tab_idx && entry.pane_id == pane_id
+                }),
+            };
             let bg = mobile_item_bg(false, active, p);
             let (icon, icon_style) = state_icon(entry.state, entry.seen, app.status_indicators, p);
             let title = Line::from(vec![
@@ -1210,6 +1215,7 @@ mod tests {
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry {
+            provider_target: None,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: PaneId::from_raw(1),

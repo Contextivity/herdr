@@ -367,6 +367,59 @@ fn agent_view_requests_round_trip() {
 }
 
 #[test]
+fn provider_agent_protocol_requests_and_focus_subscription_round_trip() {
+    let replace = Request {
+        id: "provider-replace".into(),
+        method: Method::AgentProviderReplace(AgentProviderReplaceParams {
+            source: "fleet:test".into(),
+            revision: 3,
+            viewer: AgentProviderViewer {
+                workspace_id: "w1".into(),
+                pane_id: "w1:p1".into(),
+            },
+            agents: vec![AgentProviderRecord {
+                id: "ctx-302".into(),
+                name: "Review issue 302".into(),
+                agent: Some("codex".into()),
+                title: None,
+                display_agent: Some("Codex · ai-dev-w1".into()),
+                agent_status: AgentStatus::Working,
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                state_change_seq: Some(7),
+            }],
+        }),
+    };
+    let json = serde_json::to_value(&replace).unwrap();
+    assert_eq!(json["method"], "agent.provider.replace");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, replace);
+
+    let focus = Request {
+        id: "provider-focus".into(),
+        method: Method::AgentProviderFocus(AgentProviderTarget {
+            source: "fleet:test".into(),
+            id: "ctx-302".into(),
+        }),
+    };
+    let json = serde_json::to_value(&focus).unwrap();
+    assert_eq!(json["method"], "agent.provider.focus");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, focus);
+
+    let subscription = Request {
+        id: "provider-events".into(),
+        method: Method::EventsSubscribe(EventsSubscribeParams {
+            subscriptions: vec![Subscription::AgentProviderFocused {}],
+        }),
+    };
+    let json = serde_json::to_string(&subscription).unwrap();
+    assert!(json.contains("agent.provider_focused"));
+    let restored: Request = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, subscription);
+}
+
+#[test]
 fn unknown_method_is_rejected() {
     let json = r#"{"id":"req_1","method":"nope","params":{}}"#;
     let err = serde_json::from_str::<Request>(json)
@@ -668,6 +721,7 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                agent_provider: true,
             }),
         },
     };

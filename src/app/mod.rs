@@ -19,6 +19,7 @@ mod ids;
 mod input;
 pub(crate) mod pane_graphics;
 mod popup;
+pub(crate) mod provider_agents;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -109,6 +110,7 @@ pub struct App {
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
     pub(crate) event_hub: crate::api::EventHub,
     pub(crate) last_focus: Option<(usize, crate::layout::PaneId)>,
+    pub(crate) last_provider_focus: Option<crate::api::schema::AgentProviderTarget>,
     pub(crate) no_session: bool,
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
@@ -652,6 +654,8 @@ impl App {
             agent_panel_sort,
             status_indicators: config.ui.status_indicators,
             agent_view_override: None,
+            agent_providers: std::collections::BTreeMap::new(),
+            focused_provider_agent: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             next_agent_state_change_seq: 0,
@@ -808,6 +812,7 @@ impl App {
             api_rx,
             event_hub,
             last_focus,
+            last_provider_focus: None,
             no_session,
             input_rx: None,
             last_terminal_size: terminal::size().ok(),

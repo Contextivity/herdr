@@ -237,8 +237,8 @@ impl App {
                 }
             }
             NavigateAction::FocusAgent(idx) => {
-                if let Some((ws_idx, pane_id)) = self.agent_entry_target(idx) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((ws_idx, pane_id, provider_target)) = self.agent_entry_target(idx) {
+                    self.focus_agent_panel_target_via_api(ws_idx, pane_id, provider_target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -260,15 +260,19 @@ impl App {
                 }
             }
             NavigateAction::PreviousAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(false) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((idx, ws_idx, pane_id, provider_target)) =
+                    self.relative_agent_entry(false)
+                {
+                    self.focus_agent_panel_target_via_api(ws_idx, pane_id, provider_target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
             }
             NavigateAction::NextAgent => {
-                if let Some((idx, ws_idx, pane_id)) = self.relative_agent_entry(true) {
-                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                if let Some((idx, ws_idx, pane_id, provider_target)) =
+                    self.relative_agent_entry(true)
+                {
+                    self.focus_agent_panel_target_via_api(ws_idx, pane_id, provider_target);
                     self.state.ensure_agent_panel_entry_visible(idx);
                     leave_navigate_mode(&mut self.state);
                 }
@@ -529,6 +533,17 @@ impl App {
         self.runtime_pane_focus("tui.pane.focus", pane_id);
     }
 
+    pub(crate) fn focus_agent_panel_target_via_api(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        provider_target: Option<crate::api::schema::AgentProviderTarget>,
+    ) {
+        self.state.focused_provider_agent = provider_target;
+        self.focus_pane_internal_via_api(ws_idx, pane_id);
+        self.sync_provider_focus_event();
+    }
+
     pub(crate) fn focus_pane_direction_via_api(&mut self, direction: NavDirection) {
         if let Some((ws_idx, target)) = self.directional_pane_target_from_view(direction) {
             self.focus_pane_internal_via_api(ws_idx, target);
@@ -767,25 +782,46 @@ impl App {
         Some((ws.active_tab as isize + delta).rem_euclid(ws.tabs.len() as isize) as usize)
     }
 
-    fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::layout::PaneId)> {
+    fn agent_entry_target(
+        &self,
+        idx: usize,
+    ) -> Option<(
+        usize,
+        crate::layout::PaneId,
+        Option<crate::api::schema::AgentProviderTarget>,
+    )> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         let target = entries.get(idx)?;
-        Some((target.ws_idx, target.pane_id))
+        Some((
+            target.ws_idx,
+            target.pane_id,
+            target.provider_target.clone(),
+        ))
     }
 
-    fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
+    fn relative_agent_entry(
+        &self,
+        forward: bool,
+    ) -> Option<(
+        usize,
+        usize,
+        crate::layout::PaneId,
+        Option<crate::api::schema::AgentProviderTarget>,
+    )> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         if entries.is_empty() {
             return None;
         }
-        let focused = self
+        let focused_pane = self
             .state
             .active
             .and_then(|idx| self.state.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx = entries
-            .iter()
-            .position(|entry| Some(entry.pane_id) == focused);
+        let current_idx = crate::ui::agent_entry_index_for_selection(
+            &entries,
+            self.state.focused_provider_agent.as_ref(),
+            focused_pane,
+        );
         let next_idx = match (current_idx, forward) {
             (Some(idx), true) => (idx + 1) % entries.len(),
             (Some(0), false) => entries.len() - 1,
@@ -794,7 +830,12 @@ impl App {
             (None, false) => entries.len() - 1,
         };
         let target = entries.get(next_idx)?;
-        Some((next_idx, target.ws_idx, target.pane_id))
+        Some((
+            next_idx,
+            target.ws_idx,
+            target.pane_id,
+            target.provider_target.clone(),
+        ))
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {

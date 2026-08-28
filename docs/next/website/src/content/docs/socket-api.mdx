@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear`, `agent.provider.replace`, `agent.provider.clear`, `agent.provider.get`, `agent.provider.snapshot`, `agent.provider.focus`, `agent.provider.focused` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -488,6 +488,64 @@ Clear unconditionally, or only when the named source still owns the view:
 
 A source mismatch leaves the active view unchanged. Set and clear responses use
 `type: "agent_view"` and report `active`, `source`, and optional `label`.
+
+## Data-only agent providers
+
+An agent provider adds remote or synthetic agents to the native Agents view
+without creating one local workspace, pane, or PTY for each agent. Provider
+records use the same status, metadata tokens, filters, ordering, and
+orchestration cards as local agents. `agent.list` continues to return only
+physical local agents, which prevents one provider from ingesting another
+provider's projection.
+
+`agent.provider.replace` atomically replaces one source's complete snapshot.
+The revision starts at 1 and must increase. The viewer must identify one live
+local pane. A source may contain at most 2,000 records; each record accepts up
+to 8 state labels and 32 metadata tokens. Metadata keys use at most 32 ASCII
+letters, digits, underscores, or hyphens, and values use at most 256 characters:
+
+```json
+{
+  "id": "provider_replace",
+  "method": "agent.provider.replace",
+  "params": {
+    "source": "fleet:default",
+    "revision": 12,
+    "viewer": {"workspace_id": "w1", "pane_id": "w1:p1"},
+    "agents": [{
+      "id": "linux/reviewer",
+      "name": "linux · reviewer",
+      "agent": "codex",
+      "agent_status": "working",
+      "tokens": {
+        "orchestration_id": "backlog:default",
+        "repository": "example",
+        "responsibility": "Review issue 302"
+      }
+    }]
+  }
+}
+```
+
+Use `agent.provider.get` for one source/id pair and
+`agent.provider.snapshot` for the current source snapshot. Clear a source with
+a newer tombstone revision. The snapshot remains readable after clear and
+returns that revision with no viewer and an empty `agents` list:
+
+```json
+{"id":"provider_get","method":"agent.provider.get","params":{"source":"fleet:default","id":"linux/reviewer"}}
+{"id":"provider_snapshot","method":"agent.provider.snapshot","params":{"source":"fleet:default"}}
+{"id":"provider_clear","method":"agent.provider.clear","params":{"source":"fleet:default","revision":13}}
+```
+
+`agent.provider.focus` focuses the source's shared viewer pane while preserving
+the selected provider identity in the sidebar. `agent.provider.focused` returns
+that identity. Subscribe to `agent.provider_focused` to retarget the viewer when
+selection changes; its `target` is `null` after the viewer loses focus or the
+selected record disappears.
+
+Provider snapshots are transient. Reapply them after a cold server start. The
+`ping` response advertises support as `capabilities.agent_provider`.
 
 ## Plugin APIs
 

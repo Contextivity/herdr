@@ -76,6 +76,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
     Some(ServerCapabilities {
         live_handoff: crate::platform::capabilities().live_handoff,
         detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+        agent_provider: true,
     })
 }
 
@@ -419,6 +420,12 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRename(_) => "agent.rename",
         Method::AgentViewSet(_) => "agent.view.set",
         Method::AgentViewClear(_) => "agent.view.clear",
+        Method::AgentProviderReplace(_) => "agent.provider.replace",
+        Method::AgentProviderClear(_) => "agent.provider.clear",
+        Method::AgentProviderGet(_) => "agent.provider.get",
+        Method::AgentProviderSnapshot(_) => "agent.provider.snapshot",
+        Method::AgentProviderFocus(_) => "agent.provider.focus",
+        Method::AgentProviderFocused(_) => "agent.provider.focused",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
         Method::AgentPrompt(_) => "agent.prompt",
@@ -1088,6 +1095,7 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                agent_provider: true,
             }),
             None,
             None,
