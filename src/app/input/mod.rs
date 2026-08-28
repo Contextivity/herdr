@@ -421,7 +421,14 @@ impl App {
                     }
                     MouseAction::FocusTab { tab_idx } => self.focus_tab_idx_via_api(tab_idx),
                     MouseAction::FocusPane { ws_idx, pane_id } => {
-                        self.focus_pane_internal_via_api(ws_idx, pane_id)
+                        self.focus_agent_panel_target_via_api(ws_idx, pane_id, None);
+                    }
+                    MouseAction::FocusAgent {
+                        ws_idx,
+                        pane_id,
+                        provider_target,
+                    } => {
+                        self.focus_agent_panel_target_via_api(ws_idx, pane_id, provider_target);
                     }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
                     MouseAction::MoveWorkspace {

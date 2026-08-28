@@ -63,6 +63,66 @@ pub struct AgentViewClearParams {
     pub source: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderTarget {
+    pub source: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderSource {
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderViewer {
+    pub workspace_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderRecord {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_agent: Option<String>,
+    pub agent_status: AgentStatus,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub state_labels: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[schemars(schema_with = "super::common::metadata_token_values_schema")]
+    pub tokens: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_change_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderReplaceParams {
+    pub source: String,
+    pub revision: u64,
+    pub viewer: AgentProviderViewer,
+    pub agents: Vec<AgentProviderRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderClearParams {
+    pub source: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentProviderSnapshot {
+    pub source: String,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<AgentProviderViewer>,
+    pub agents: Vec<AgentProviderRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum AgentViewFilter {

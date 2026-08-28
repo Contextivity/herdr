@@ -490,7 +490,12 @@ impl AppState {
     pub(super) fn agent_detail_target_at(
         &self,
         row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    ) -> Option<(
+        usize,
+        usize,
+        crate::layout::PaneId,
+        Option<crate::api::schema::AgentProviderTarget>,
+    )> {
         if self.sidebar_collapsed {
             return None;
         }
@@ -499,9 +504,14 @@ impl AppState {
         let entries = crate::ui::agent_panel_entries(self);
         let item = crate::ui::agent_panel_item_at_row(self, detail_area, row)?;
         let entry_index = item.entry_index()?;
-        entries
-            .get(entry_index)
-            .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+        entries.get(entry_index).map(|entry| {
+            (
+                entry.ws_idx,
+                entry.tab_idx,
+                entry.pane_id,
+                entry.provider_target.clone(),
+            )
+        })
     }
 
     pub(super) fn orchestration_card_at_row(&self, row: u16) -> Option<String> {
@@ -777,18 +787,18 @@ mod tests {
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            Some((0, 0, first_pane, None))
         );
         assert_eq!(app.state.agent_detail_target_at(body.y + 1), None);
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 3),
-            Some((1, 0, second_pane))
+            Some((1, 0, second_pane, None))
         );
 
         app.state.sidebar_agents.row_gap = 0;
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 1),
-            Some((1, 0, second_pane))
+            Some((1, 0, second_pane, None))
         );
     }
 
@@ -832,7 +842,7 @@ mod tests {
 
         assert_eq!(
             app.state.agent_detail_target_at(body.y),
-            Some((0, 0, first_pane))
+            Some((0, 0, first_pane, None))
         );
     }
 
@@ -869,13 +879,78 @@ mod tests {
         );
         assert_eq!(
             app.state.agent_detail_target_at(body.y + 3),
-            Some((0, 0, pane_id))
+            Some((0, 0, pane_id, None))
         );
 
         app.state
             .collapsed_space_keys
             .insert("orchestration:run-1".into());
         assert_eq!(app.state.agent_detail_target_at(body.y + 3), None);
+    }
+
+    #[test]
+    fn provider_agent_focus_mouse_click_keeps_external_identity_on_shared_viewer() {
+        let mut app = app_for_mouse_test();
+        let workspace = Workspace::test_new("Fleet terminal");
+        let pane_id = workspace.root_pane;
+        let workspace_id = workspace.id.clone();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let target = crate::api::schema::AgentProviderTarget {
+            source: "fleet:test".into(),
+            id: "ctx-302".into(),
+        };
+        app.state.agent_providers.insert(
+            target.source.clone(),
+            crate::app::provider_agents::AgentProviderState {
+                revision: 1,
+                viewer: Some(crate::app::provider_agents::ProviderViewerTarget {
+                    workspace_id: workspace_id.clone(),
+                    pane_id,
+                    public_pane_id: crate::workspace::public_pane_id_for_number(&workspace_id, 1),
+                }),
+                agents: vec![crate::api::schema::AgentProviderRecord {
+                    id: target.id.clone(),
+                    name: "Review issue 302".into(),
+                    agent: Some("codex".into()),
+                    title: None,
+                    display_agent: None,
+                    agent_status: crate::api::schema::AgentStatus::Working,
+                    state_labels: Default::default(),
+                    tokens: std::collections::HashMap::from([
+                        ("orchestration_id".into(), "run-1".into()),
+                        ("orchestration_label".into(), "Backlog wave".into()),
+                        ("repository".into(), "stack".into()),
+                        ("responsibility".into(), "Review issue 302".into()),
+                    ]),
+                    state_change_seq: Some(1),
+                }],
+            },
+        );
+        let panel = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, panel);
+        let body =
+            crate::ui::agent_panel_body_rect(panel, crate::ui::should_show_scrollbar(metrics));
+
+        assert_eq!(
+            app.state.agent_detail_target_at(body.y + 3),
+            Some((0, 0, pane_id, Some(target.clone())))
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 2,
+            body.y + 3,
+        ));
+        assert_eq!(app.state.focused_provider_agent, Some(target));
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
+        assert!(app
+            .event_hub
+            .events_after(0)
+            .iter()
+            .any(|(_, event)| matches!(
+                event.data,
+                crate::api::schema::EventData::AgentProviderFocused { target: Some(_) }
+            )));
     }
 
     #[test]

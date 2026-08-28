@@ -119,6 +119,18 @@ pub enum Method {
     AgentViewSet(AgentViewSetParams),
     #[serde(rename = "agent.view.clear")]
     AgentViewClear(AgentViewClearParams),
+    #[serde(rename = "agent.provider.replace")]
+    AgentProviderReplace(AgentProviderReplaceParams),
+    #[serde(rename = "agent.provider.clear")]
+    AgentProviderClear(AgentProviderClearParams),
+    #[serde(rename = "agent.provider.get")]
+    AgentProviderGet(AgentProviderTarget),
+    #[serde(rename = "agent.provider.snapshot")]
+    AgentProviderSnapshot(AgentProviderSource),
+    #[serde(rename = "agent.provider.focus")]
+    AgentProviderFocus(AgentProviderTarget),
+    #[serde(rename = "agent.provider.focused")]
+    AgentProviderFocused(EmptyParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]
