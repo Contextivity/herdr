@@ -802,28 +802,6 @@ fn agent_restore_name(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
-#[cfg(test)]
-mod restore_name_tests {
-    #[test]
-    fn agent_restore_name_accepts_guard_before_between_and_after_positionals() {
-        for args in [
-            ["--expected-terminal-id", "term_a", "w1:p1", "reviewer"],
-            ["w1:p1", "--expected-terminal-id", "term_a", "reviewer"],
-            ["w1:p1", "reviewer", "--expected-terminal-id", "term_a"],
-        ] {
-            let params = super::restore_name_params(&args.map(String::from)).unwrap();
-            assert_eq!(params.target, "w1:p1");
-            assert_eq!(params.name, "reviewer");
-            assert_eq!(params.expected_terminal_id, "term_a");
-        }
-        assert!(super::restore_name_params(&["w1:p1", "reviewer"].map(String::from)).is_none());
-        assert!(super::restore_name_params(
-            &["w1:p1", "reviewer", "--expected-terminal-id", ""].map(String::from)
-        )
-        .is_none());
-    }
-}
-
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
@@ -1003,4 +981,26 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod restore_name_tests {
+    #[test]
+    fn agent_restore_name_accepts_guard_before_between_and_after_positionals() {
+        for args in [
+            ["--expected-terminal-id", "term_a", "w1:p1", "reviewer"],
+            ["w1:p1", "--expected-terminal-id", "term_a", "reviewer"],
+            ["w1:p1", "reviewer", "--expected-terminal-id", "term_a"],
+        ] {
+            let params = super::restore_name_params(&args.map(String::from)).unwrap();
+            assert_eq!(params.target, "w1:p1");
+            assert_eq!(params.name, "reviewer");
+            assert_eq!(params.expected_terminal_id, "term_a");
+        }
+        assert!(super::restore_name_params(&["w1:p1", "reviewer"].map(String::from)).is_none());
+        assert!(super::restore_name_params(
+            &["w1:p1", "reviewer", "--expected-terminal-id", ""].map(String::from)
+        )
+        .is_none());
+    }
 }
