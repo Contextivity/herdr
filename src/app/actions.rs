@@ -1521,6 +1521,7 @@ impl AppState {
         };
         let ws_idx = target.ws_idx;
         let pane_id = target.pane_id;
+        self.focused_provider_agent = target.provider_target.clone();
 
         if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
@@ -1542,12 +1543,15 @@ impl AppState {
             return;
         }
 
-        let focused = self
+        let focused_pane = self
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
+        let current_idx = crate::ui::agent_entry_index_for_selection(
+            &entries,
+            self.focused_provider_agent.as_ref(),
+            focused_pane,
+        );
         let target_idx = match (current_idx, forward) {
             (Some(idx), true) => (idx + 1) % entries.len(),
             (Some(0), false) => entries.len() - 1,

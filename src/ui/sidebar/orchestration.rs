@@ -110,6 +110,7 @@ pub(crate) fn build(
     entries: &[AgentPanelEntry],
     collapsed_keys: &HashSet<String>,
     active: Option<(usize, usize, crate::layout::PaneId)>,
+    provider_active: Option<&crate::api::schema::AgentProviderTarget>,
 ) -> AgentPanelLayout {
     let mut runs = Vec::<RunGroup>::new();
     let mut run_index = HashMap::<String, usize>::new();
@@ -194,9 +195,12 @@ pub(crate) fn build(
                 });
                 for entry_index in repository.entries {
                     let entry = &entries[entry_index];
-                    let selected = active.is_some_and(|target| {
-                        target == (entry.ws_idx, entry.tab_idx, entry.pane_id)
-                    });
+                    let selected = match entry.provider_target.as_ref() {
+                        Some(target) => provider_active == Some(target),
+                        None => active.is_some_and(|target| {
+                            target == (entry.ws_idx, entry.tab_idx, entry.pane_id)
+                        }),
+                    };
                     items.push(AgentPanelItem::Agent {
                         entry_index,
                         responsibility: responsibility(entry),
@@ -242,10 +246,7 @@ fn status(entry: &AgentPanelEntry) -> String {
 fn metadata_line(entry: &AgentPanelEntry) -> String {
     let state = status(entry).to_ascii_uppercase();
     if state == "DONE" {
-        return match entry.tokens.get("cleanup_age") {
-            Some(age) => format!("DONE · awaiting cleanup {age}"),
-            None => "DONE · awaiting cleanup".into(),
-        };
+        return "DONE · awaiting cleanup".into();
     }
     let harness = entry
         .tokens
@@ -329,6 +330,7 @@ mod tests {
             tokens.insert("orchestration_state".into(), "active".into());
         }
         AgentPanelEntry {
+            provider_target: None,
             ws_idx: name.len(),
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(name.len() as u32 + 1),
@@ -359,7 +361,7 @@ mod tests {
             entry("two", Some("run-1"), "frontend", "question"),
             entry("legacy", None, "legacy", "idle"),
         ];
-        let layout = build(&entries, &HashSet::new(), None);
+        let layout = build(&entries, &HashSet::new(), None, None);
 
         assert!(matches!(
             &layout.items[0],
@@ -379,7 +381,7 @@ mod tests {
     #[test]
     fn orchestration_sidebar_keeps_done_agent_until_entry_is_removed() {
         let entries = vec![entry("done", Some("run-1"), "stack", "done")];
-        let layout = build(&entries, &HashSet::new(), None);
+        let layout = build(&entries, &HashSet::new(), None, None);
         assert!(layout.items.iter().any(|item| matches!(
             item,
             AgentPanelItem::Agent { metadata, .. } if metadata == "DONE · awaiting cleanup"
@@ -390,7 +392,7 @@ mod tests {
     fn orchestration_sidebar_collapses_children_but_keeps_card() {
         let entries = vec![entry("one", Some("run-1"), "stack", "working")];
         let collapsed = HashSet::from([collapse_key("run-1")]);
-        let layout = build(&entries, &collapsed, None);
+        let layout = build(&entries, &collapsed, None, None);
         assert_eq!(layout.items.len(), 2);
         assert!(matches!(
             layout.items[0],
@@ -406,7 +408,7 @@ mod tests {
     fn orchestration_sidebar_selected_agent_expands_to_three_lines() {
         let entries = vec![entry("one", Some("run-1"), "stack", "working")];
         let target = (entries[0].ws_idx, entries[0].tab_idx, entries[0].pane_id);
-        let layout = build(&entries, &HashSet::new(), Some(target));
+        let layout = build(&entries, &HashSet::new(), Some(target), None);
         let item = layout
             .items
             .iter()
@@ -434,7 +436,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let started = Instant::now();
-        let layout = build(&entries, &HashSet::new(), None);
+        let layout = build(&entries, &HashSet::new(), None, None);
         let elapsed = started.elapsed();
 
         assert_eq!(

@@ -38,6 +38,11 @@ pub(super) enum MouseAction {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     },
+    FocusAgent {
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        provider_target: Option<crate::api::schema::AgentProviderTarget>,
+    },
     FocusToastTarget,
     MoveWorkspace {
         source_ws_idx: usize,
@@ -637,11 +642,15 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
+                    if let Some((ws_idx, _tab_idx, pane_id, provider_target)) =
                         self.agent_detail_target_at(mouse.row)
                     {
                         self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                        return Some(MouseAction::FocusAgent {
+                            ws_idx,
+                            pane_id,
+                            provider_target,
+                        });
                     }
                 } else if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
                     if self.mode != Mode::Terminal {
@@ -1221,9 +1230,14 @@ impl AppState {
                 ws_idx,
                 tab_idx: _,
                 pane_id,
+                provider_target,
             }) => {
                 self.mode = Mode::Terminal;
-                return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
+                return MobileMouseResult::Action(MouseAction::FocusAgent {
+                    ws_idx,
+                    pane_id,
+                    provider_target,
+                });
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);

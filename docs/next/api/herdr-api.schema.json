@@ -39,6 +39,21 @@
     },
     "event": {
       "$defs": {
+        "AgentProviderTarget": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "id"
+          ],
+          "type": "object"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -710,6 +725,28 @@
             },
             {
               "properties": {
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/AgentProviderTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "agent_provider_focused",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/event/$defs/PaneLayoutSnapshot"
                 },
@@ -753,6 +790,7 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_provider_focused",
             "layout_updated"
           ],
           "type": "string"
@@ -1264,6 +1302,153 @@
               "type": "array"
             }
           },
+          "type": "object"
+        },
+        "AgentProviderClearParams": {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "revision"
+          ],
+          "type": "object"
+        },
+        "AgentProviderRecord": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_status": {
+              "$ref": "#/schemas/request/$defs/AgentStatus"
+            },
+            "display_agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state_labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "agent_status"
+          ],
+          "type": "object"
+        },
+        "AgentProviderReplaceParams": {
+          "properties": {
+            "agents": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentProviderRecord"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "viewer": {
+              "$ref": "#/schemas/request/$defs/AgentProviderViewer"
+            }
+          },
+          "required": [
+            "source",
+            "revision",
+            "viewer",
+            "agents"
+          ],
+          "type": "object"
+        },
+        "AgentProviderSource": {
+          "properties": {
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "type": "object"
+        },
+        "AgentProviderTarget": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "id"
+          ],
+          "type": "object"
+        },
+        "AgentProviderViewer": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "pane_id"
+          ],
           "type": "object"
         },
         "AgentReadParams": {
@@ -4057,6 +4242,18 @@
             {
               "properties": {
                 "type": {
+                  "const": "agent.provider_focused",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
                   "const": "layout.updated",
                   "type": "string"
                 }
@@ -5076,6 +5273,102 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentViewClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.replace",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentProviderReplaceParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.clear",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentProviderClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.get",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentProviderTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentProviderSource"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.focus",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentProviderTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.provider.focused",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
             }
           },
           "required": [
@@ -6346,6 +6639,131 @@
           ],
           "type": "object"
         },
+        "AgentProviderRecord": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "display_agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state_labels": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tokens": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Za-z0-9_-]{1,32}$"
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "agent_status"
+          ],
+          "type": "object"
+        },
+        "AgentProviderSnapshot": {
+          "properties": {
+            "agents": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentProviderRecord"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "viewer": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentProviderViewer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "source",
+            "revision",
+            "agents"
+          ],
+          "type": "object"
+        },
+        "AgentProviderTarget": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "id"
+          ],
+          "type": "object"
+        },
+        "AgentProviderViewer": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -7033,6 +7451,28 @@
             },
             {
               "properties": {
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentProviderTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "agent_provider_focused",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
                 },
@@ -7091,6 +7531,7 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "agent_provider_focused",
             "layout_updated"
           ],
           "type": "string"
@@ -9046,6 +9487,86 @@
             },
             {
               "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/AgentProviderSnapshot"
+                },
+                "type": {
+                  "const": "agent_provider",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_provider_cleared",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "source",
+                "revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "record": {
+                  "$ref": "#/schemas/success_response/$defs/AgentProviderRecord"
+                },
+                "target": {
+                  "$ref": "#/schemas/success_response/$defs/AgentProviderTarget"
+                },
+                "type": {
+                  "const": "agent_provider_record",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "target",
+                "record"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentProviderTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "agent_provider_focus",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane": {
                   "$ref": "#/schemas/success_response/$defs/PaneInfo"
                 },
@@ -9847,6 +10368,10 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "agent_provider": {
+              "default": false,
+              "type": "boolean"
+            },
             "detached_server_daemon": {
               "default": false,
               "type": "boolean"

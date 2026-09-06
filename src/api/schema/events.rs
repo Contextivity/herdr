@@ -80,6 +80,8 @@ pub enum Subscription {
     },
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
+    #[serde(rename = "agent.provider_focused")]
+    AgentProviderFocused {},
     #[serde(rename = "layout.updated")]
     LayoutUpdated {},
 }
@@ -217,6 +219,7 @@ pub enum EventKind {
     PaneExited,
     PaneAgentDetected,
     PaneAgentStatusChanged,
+    AgentProviderFocused,
     LayoutUpdated,
 }
 
@@ -248,6 +251,7 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::AgentProviderFocused => "agent.provider_focused",
             EventKind::LayoutUpdated => "layout.updated",
         }
     }
@@ -280,6 +284,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::AgentProviderFocused,
     EventKind::LayoutUpdated,
 ];
 
@@ -549,6 +554,10 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    AgentProviderFocused {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<super::agents::AgentProviderTarget>,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,

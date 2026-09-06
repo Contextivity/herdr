@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_provider;
 mod agent_view;
 mod agents;
 mod env;
@@ -851,6 +852,7 @@ impl App {
         &mut self,
         outer_event: Option<crate::ghostty::FocusEvent>,
     ) {
+        self.sync_provider_focus_event();
         let current_focus = self.state.active.and_then(|idx| {
             self.state
                 .workspaces
@@ -905,6 +907,42 @@ impl App {
         }
 
         self.last_focus = current_focus;
+    }
+
+    pub(crate) fn sync_provider_focus_event(&mut self) {
+        let physical_focus = self.state.active.and_then(|ws_idx| {
+            self.state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.focused_pane_id().map(|pane_id| (ws_idx, pane_id)))
+        });
+        let selected = self.state.focused_provider_agent.clone().filter(|target| {
+            let Some(provider) = self.state.agent_providers.get(&target.source) else {
+                return false;
+            };
+            if !provider.agents.iter().any(|record| record.id == target.id) {
+                return false;
+            }
+            let Some(viewer) = provider.viewer.as_ref() else {
+                return false;
+            };
+            physical_focus.is_some_and(|(ws_idx, pane_id)| {
+                self.state.workspaces[ws_idx].id == viewer.workspace_id && pane_id == viewer.pane_id
+            })
+        });
+        if selected != self.state.focused_provider_agent {
+            self.state.focused_provider_agent = selected.clone();
+        }
+        if selected == self.last_provider_focus {
+            return;
+        }
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::AgentProviderFocused,
+            data: crate::api::schema::EventData::AgentProviderFocused {
+                target: selected.clone(),
+            },
+        });
+        self.last_provider_focus = selected;
     }
 
     fn send_pane_focus_event(
@@ -1068,6 +1106,24 @@ impl App {
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
                 return self.handle_agent_view_clear(request.id, params)
+            }
+            Method::AgentProviderReplace(params) => {
+                return self.handle_agent_provider_replace(request.id, params)
+            }
+            Method::AgentProviderClear(params) => {
+                return self.handle_agent_provider_clear(request.id, params)
+            }
+            Method::AgentProviderGet(target) => {
+                return self.handle_agent_provider_get(request.id, target)
+            }
+            Method::AgentProviderSnapshot(source) => {
+                return self.handle_agent_provider_snapshot(request.id, source)
+            }
+            Method::AgentProviderFocus(target) => {
+                return self.handle_agent_provider_focus(request.id, target)
+            }
+            Method::AgentProviderFocused(_) => {
+                return self.handle_agent_provider_focused(request.id)
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(params) => return self.handle_agent_prompt(request.id, params),

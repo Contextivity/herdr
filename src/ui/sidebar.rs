@@ -23,6 +23,7 @@ const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 
 pub(crate) struct AgentPanelEntry {
+    pub provider_target: Option<crate::api::schema::AgentProviderTarget>,
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
@@ -115,12 +116,32 @@ pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
 
+pub(crate) fn agent_entry_index_for_selection(
+    entries: &[AgentPanelEntry],
+    provider_target: Option<&crate::api::schema::AgentProviderTarget>,
+    focused_pane: Option<crate::layout::PaneId>,
+) -> Option<usize> {
+    match provider_target {
+        Some(target) => entries
+            .iter()
+            .position(|entry| entry.provider_target.as_ref() == Some(target)),
+        None => entries.iter().position(|entry| {
+            entry.provider_target.is_none() && Some(entry.pane_id) == focused_pane
+        }),
+    }
+}
+
 pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
-pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
-    let has_orchestration = app.workspaces.iter().any(|workspace| {
+pub(crate) fn has_orchestration_metadata(app: &AppState) -> bool {
+    app.agent_providers.values().any(|provider| {
+        provider
+            .agents
+            .iter()
+            .any(|record| record.tokens.contains_key("orchestration_id"))
+    }) || app.workspaces.iter().any(|workspace| {
         workspace.tabs.iter().any(|tab| {
             tab.panes.values().any(|pane| {
                 app.terminals
@@ -130,8 +151,11 @@ pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
                     })
             })
         })
-    });
-    if has_orchestration {
+    })
+}
+
+pub(crate) fn effective_sidebar_section_split(app: &AppState) -> f32 {
+    if has_orchestration_metadata(app) {
         0.15
     } else {
         app.sidebar_section_split
@@ -167,7 +191,8 @@ fn collect_agent_panel_entries_with_runtimes(
         }
     };
 
-    app.workspaces
+    let mut entries = app
+        .workspaces
         .iter()
         .enumerate()
         .flat_map(|(ws_idx, ws)| {
@@ -182,6 +207,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             .get(detail.tab_idx)
                             .is_some_and(|tab| !tab.is_auto_named());
                     AgentPanelEntry {
+                        provider_target: None,
                         ws_idx,
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
@@ -201,7 +227,55 @@ fn collect_agent_panel_entries_with_runtimes(
                     }
                 })
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    for (source, provider) in &app.agent_providers {
+        let Some(viewer) = provider.viewer.as_ref() else {
+            continue;
+        };
+        let Some(ws_idx) = app
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == viewer.workspace_id)
+        else {
+            continue;
+        };
+        let Some(tab_idx) = app.workspaces[ws_idx].find_tab_index_for_pane(viewer.pane_id) else {
+            continue;
+        };
+        for record in &provider.agents {
+            let (state, seen) = match record.agent_status {
+                crate::api::schema::AgentStatus::Idle => (AgentState::Idle, true),
+                crate::api::schema::AgentStatus::Working => (AgentState::Working, true),
+                crate::api::schema::AgentStatus::Blocked => (AgentState::Blocked, true),
+                crate::api::schema::AgentStatus::Done => (AgentState::Idle, false),
+                crate::api::schema::AgentStatus::Unknown => (AgentState::Unknown, true),
+            };
+            entries.push(AgentPanelEntry {
+                provider_target: Some(crate::api::schema::AgentProviderTarget {
+                    source: source.clone(),
+                    id: record.id.clone(),
+                }),
+                ws_idx,
+                tab_idx,
+                pane_id: viewer.pane_id,
+                primary_label: record.name.clone(),
+                primary_tab_label: None,
+                pane_label: None,
+                terminal_title: record.title.clone(),
+                terminal_title_stripped: record.title.clone(),
+                agent_label: Some(record.name.clone()),
+                agent_kind_label: record.agent.clone(),
+                agent: None,
+                state,
+                seen,
+                last_agent_state_change_seq: record.state_change_seq,
+                state_labels: record.state_labels.clone(),
+                tokens: record.tokens.clone(),
+            });
+        }
+    }
+    entries
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -577,7 +651,12 @@ fn orchestration_layout(app: &AppState, entries: &[AgentPanelEntry]) -> AgentPan
         .iter()
         .find(|entry| app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id))
         .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id));
-    orchestration::build(entries, &app.collapsed_space_keys, active)
+    orchestration::build(
+        entries,
+        &app.collapsed_space_keys,
+        active,
+        app.focused_provider_agent.as_ref(),
+    )
 }
 
 pub(crate) fn orchestration_collapse_key(orchestration_id: &str) -> String {
@@ -637,6 +716,42 @@ fn card_content_line(text: &str, width: u16) -> String {
     let text = truncate_end(text, inner);
     let gap = inner.saturating_sub(display_width(&text));
     format!("│{text}{}│", " ".repeat(gap))
+}
+
+fn card_agent_line(
+    icon: &str,
+    responsibility: &str,
+    width: u16,
+    row_style: Style,
+    icon_color: Color,
+    text_color: Color,
+    border_color: Color,
+) -> Line<'static> {
+    if width < 2 {
+        return Line::from(Span::styled(
+            truncate_end(icon, width as usize),
+            row_style.fg(icon_color),
+        ));
+    }
+    let inner = width.saturating_sub(2) as usize;
+    let icon_width = display_width(icon).min(inner);
+    let separator_width = usize::from(icon_width < inner);
+    let label_width = inner.saturating_sub(icon_width + separator_width);
+    let responsibility = truncate_end(responsibility, label_width);
+    let used = icon_width + separator_width + display_width(&responsibility);
+    let padding = inner.saturating_sub(used);
+
+    Line::from(vec![
+        Span::styled("│", row_style.fg(border_color)),
+        Span::styled(icon.to_string(), row_style.fg(icon_color)),
+        Span::styled(" ".repeat(separator_width), row_style.fg(text_color)),
+        Span::styled(
+            responsibility,
+            row_style.fg(text_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ".repeat(padding), row_style.fg(text_color)),
+        Span::styled("│", row_style.fg(border_color)),
+    ])
 }
 
 fn card_divider_line(label: &str, width: u16) -> String {
@@ -1710,15 +1825,15 @@ fn render_agent_detail(
                 };
                 let status_color = state_label_color(detail.state, detail.seen, p);
                 frame.render_widget(
-                    Paragraph::new(card_content_line(
-                        &format!("{icon} {responsibility}"),
+                    Paragraph::new(card_agent_line(
+                        icon,
+                        responsibility,
                         body.width,
-                    ))
-                    .style(
-                        row_style
-                            .fg(if *selected { p.text } else { p.subtext0 })
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                        row_style.fg(if *selected { p.text } else { p.subtext0 }),
+                        status_color,
+                        if *selected { p.text } else { p.subtext0 },
+                        p.overlay0,
+                    )),
                     Rect::new(body.x, row_y, body.width, 1),
                 );
                 let metadata_color = if status == "done" {
@@ -2015,9 +2130,140 @@ mod tests {
         assert!(rows
             .iter()
             .any(|row| row.contains("ctx-280c") && row.contains("feat-280c")));
+        let agent_row = body.y + 3;
+        let dot_x = find_symbol_x(buffer, agent_row, body.width, "●");
+        assert_eq!(
+            buffer[(dot_x, agent_row)].style().fg,
+            Some(app.palette.yellow)
+        );
         assert!(rows
             .iter()
             .any(|row| row.starts_with('└') && row.ends_with('┘')));
+    }
+
+    fn provider_record(index: usize) -> crate::api::schema::AgentProviderRecord {
+        crate::api::schema::AgentProviderRecord {
+            id: format!("remote-{index}"),
+            name: format!("Remote review {index}"),
+            agent: Some("codex".into()),
+            title: None,
+            display_agent: Some("Codex · ai-dev-w1".into()),
+            agent_status: crate::api::schema::AgentStatus::Working,
+            state_labels: Default::default(),
+            tokens: std::collections::HashMap::from([
+                ("orchestration_id".into(), format!("run-{}", index % 20)),
+                (
+                    "orchestration_label".into(),
+                    format!("Backlog wave {}", index % 20),
+                ),
+                ("orchestration_owner".into(), "t3".into()),
+                ("orchestration_state".into(), "active".into()),
+                ("repository".into(), format!("repo-{}", (index / 20) % 10)),
+                ("responsibility".into(), format!("Review issue {index}")),
+                ("remote_agent".into(), format!("ctx-{index}")),
+                ("remote_host".into(), "ai-dev-w1".into()),
+                ("remote_state".into(), "working".into()),
+            ]),
+            state_change_seq: Some(index as u64),
+        }
+    }
+
+    fn state_with_provider(count: usize) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        let workspace = Workspace::test_new("Fleet terminal");
+        let pane_id = workspace.root_pane;
+        let workspace_id = workspace.id.clone();
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_providers.insert(
+            "fleet:test".into(),
+            crate::app::provider_agents::AgentProviderState {
+                revision: 1,
+                viewer: Some(crate::app::provider_agents::ProviderViewerTarget {
+                    workspace_id: workspace_id.clone(),
+                    pane_id,
+                    public_pane_id: crate::workspace::public_pane_id_for_number(&workspace_id, 1),
+                }),
+                agents: (0..count).map(provider_record).collect(),
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn provider_agent_sidebar_uses_native_orchestration_cards_without_agent_workspaces() {
+        let mut app = state_with_provider(1);
+        app.focused_provider_agent = Some(crate::api::schema::AgentProviderTarget {
+            source: "fleet:test".into(),
+            id: "remote-0".into(),
+        });
+        let entries = agent_panel_entries(&app);
+        let layout = orchestration_layout(&app, &entries);
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider_target.as_ref().unwrap().id, "remote-0");
+        assert!(layout.items.iter().any(|item| matches!(
+            item,
+            AgentPanelItem::RunHeader { label, .. } if label == "Backlog wave 0"
+        )));
+        assert!(layout.items.iter().any(|item| matches!(
+            item,
+            AgentPanelItem::Agent { responsibility, selected: true, .. }
+                if responsibility == "Review issue 0"
+        )));
+    }
+
+    #[test]
+    fn provider_agent_sidebar_scale_500_keeps_one_viewer_workspace() {
+        let app = state_with_provider(500);
+        let entries = agent_panel_entries(&app);
+        let layout = orchestration_layout(&app, &entries);
+
+        assert_eq!(app.workspaces.len(), 1);
+        assert_eq!(entries.len(), 500);
+        assert_eq!(
+            layout
+                .items
+                .iter()
+                .filter(|item| matches!(item, AgentPanelItem::Agent { .. }))
+                .count(),
+            500
+        );
+        assert_eq!(
+            layout
+                .items
+                .iter()
+                .filter(|item| matches!(item, AgentPanelItem::RunHeader { .. }))
+                .count(),
+            20
+        );
+        assert_eq!(
+            layout
+                .items
+                .iter()
+                .filter(|item| matches!(item, AgentPanelItem::RepositoryHeader { .. }))
+                .count(),
+            200
+        );
+    }
+
+    #[test]
+    #[ignore = "local render-path measurement; deterministic structure is tested above"]
+    fn provider_agent_sidebar_benchmark_500_grouped() {
+        let app = state_with_provider(500);
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            let entries = agent_panel_entries(&app);
+            std::hint::black_box(orchestration_layout(&app, &entries));
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "provider 500-agent grouped layout: {:?} total, {:?} average",
+            elapsed,
+            elapsed / 100
+        );
     }
 
     #[test]

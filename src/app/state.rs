@@ -1532,6 +1532,11 @@ pub struct AppState {
     pub status_indicators: crate::config::StatusIndicatorStyle,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
+    /// Transient, source-owned agents that are rendered without local PTYs.
+    pub(crate) agent_providers:
+        std::collections::BTreeMap<String, super::provider_agents::AgentProviderState>,
+    /// Logical provider selection; its physical focus remains on the shared viewer pane.
+    pub(crate) focused_provider_agent: Option<crate::api::schema::AgentProviderTarget>,
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     pub next_agent_state_change_seq: u64,
@@ -1916,7 +1921,7 @@ impl AppState {
             default_sidebar_width: 26,
             sidebar_width: 26,
             sidebar_min_width: 18,
-            sidebar_max_width: 36,
+            sidebar_max_width: 72,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
@@ -1926,6 +1931,8 @@ impl AppState {
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             agent_view_override: None,
+            agent_providers: std::collections::BTreeMap::new(),
+            focused_provider_agent: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             next_agent_state_change_seq: 0,

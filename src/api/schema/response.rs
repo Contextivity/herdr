@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentInfo, AgentProviderRecord, AgentProviderSnapshot, AgentProviderTarget};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -113,6 +113,21 @@ pub enum ResponseResult {
         source: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+    },
+    AgentProvider {
+        snapshot: AgentProviderSnapshot,
+    },
+    AgentProviderCleared {
+        source: String,
+        revision: u64,
+    },
+    AgentProviderRecord {
+        target: AgentProviderTarget,
+        record: AgentProviderRecord,
+    },
+    AgentProviderFocus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<AgentProviderTarget>,
     },
     PaneInfo {
         pane: PaneInfo,
