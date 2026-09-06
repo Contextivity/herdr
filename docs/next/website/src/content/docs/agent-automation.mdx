@@ -56,6 +56,14 @@ herdr agent get w1:p2
 herdr agent rename w1:p2 reviewer
 ```
 
+After a launch timeout, inspect the original terminal before retrying: the agent may already be executing its initial task. If its process and task identity still match, restore the name with the captured terminal ID:
+
+```bash
+herdr agent restore-name w1:p2 reviewer --expected-terminal-id term_captured
+```
+
+The server checks the terminal ID and requires the source name to be absent or already `reviewer`, in the same operation that restores the name. A different source name, destination-name collision, pending launch, or missing agent is rejected. This command does not restart the process, send a prompt, or verify its model, arguments, credentials, or task; the caller must verify those separately. Older servers reject the distinct `agent.restore_name` API method. Keep an unsupported or uncertain recovery blocked; do not fall back to `rename` or submit the task again.
+
 ## Choose the control surface
 
 | Goal | Command |

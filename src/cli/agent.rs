@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentRestoreNameParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -22,6 +23,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
+        "restore-name" => agent_restore_name(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
@@ -768,6 +770,60 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn restore_name_params(args: &[String]) -> Option<AgentRestoreNameParams> {
+    let (target, name, flag, terminal_id) = match args {
+        [flag, terminal_id, target, name] if flag == "--expected-terminal-id" => {
+            (target, name, flag, terminal_id)
+        }
+        [target, flag, terminal_id, name] if flag == "--expected-terminal-id" => {
+            (target, name, flag, terminal_id)
+        }
+        [target, name, flag, terminal_id] => (target, name, flag, terminal_id),
+        _ => return None,
+    };
+    if flag != "--expected-terminal-id" || terminal_id.is_empty() {
+        return None;
+    }
+    Some(AgentRestoreNameParams {
+        target: target.clone(),
+        name: name.clone(),
+        expected_terminal_id: terminal_id.clone(),
+    })
+}
+
+fn agent_restore_name(args: &[String]) -> std::io::Result<i32> {
+    let Some(params) = restore_name_params(args) else {
+        eprintln!("usage: herdr agent restore-name <target> <name> --expected-terminal-id <id>");
+        return Ok(2);
+    };
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:restore_name".into(),
+        method: Method::AgentRestoreName(params),
+    })?)
+}
+
+#[cfg(test)]
+mod restore_name_tests {
+    #[test]
+    fn agent_restore_name_accepts_guard_before_between_and_after_positionals() {
+        for args in [
+            ["--expected-terminal-id", "term_a", "w1:p1", "reviewer"],
+            ["w1:p1", "--expected-terminal-id", "term_a", "reviewer"],
+            ["w1:p1", "reviewer", "--expected-terminal-id", "term_a"],
+        ] {
+            let params = super::restore_name_params(&args.map(String::from)).unwrap();
+            assert_eq!(params.target, "w1:p1");
+            assert_eq!(params.name, "reviewer");
+            assert_eq!(params.expected_terminal_id, "term_a");
+        }
+        assert!(super::restore_name_params(&["w1:p1", "reviewer"].map(String::from)).is_none());
+        assert!(super::restore_name_params(
+            &["w1:p1", "reviewer", "--expected-terminal-id", ""].map(String::from)
+        )
+        .is_none());
+    }
+}
+
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
@@ -927,6 +983,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
+    eprintln!("  herdr agent restore-name <target> <name> --expected-terminal-id <id>");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");

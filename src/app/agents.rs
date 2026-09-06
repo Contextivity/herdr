@@ -92,6 +92,24 @@ impl App {
         target: &str,
         name: Option<String>,
     ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
+        self.rename_agent_target_checked(target, name, None)
+    }
+
+    pub(super) fn restore_agent_name(
+        &mut self,
+        target: &str,
+        name: String,
+        expected_terminal_id: &str,
+    ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
+        self.rename_agent_target_checked(target, Some(name), Some(expected_terminal_id))
+    }
+
+    fn rename_agent_target_checked(
+        &mut self,
+        target: &str,
+        name: Option<String>,
+        expected_terminal_id: Option<&str>,
+    ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
         let resolved = self
             .resolve_agent_target(target)
             .map_err(AgentRenameError::Target)?;
@@ -121,6 +139,18 @@ impl App {
                 target: target.to_string(),
             }));
         };
+        // These preconditions and the name mutation share one server request;
+        // there is no intervening await or client-side check-to-use window.
+        if let Some(expected) = expected_terminal_id {
+            if resolved.terminal_id != expected
+                || terminal
+                    .agent_name
+                    .as_ref()
+                    .is_some_and(|current| Some(current) != normalized_name.as_ref())
+            {
+                return Err(AgentRenameError::OwnershipChanged);
+            }
+        }
         if terminal.managed_agent_launch_pending() {
             return Err(AgentRenameError::PendingLaunch);
         }
@@ -328,6 +358,10 @@ impl App {
                 code: "invalid_agent_name".into(),
                 message: INVALID_AGENT_NAME_MESSAGE.into(),
             },
+            AgentRenameError::OwnershipChanged => crate::api::schema::ErrorBody {
+                code: "agent_ownership_changed".into(),
+                message: "terminal identity or source agent name changed; restoration refused".into(),
+            },
             AgentRenameError::NotAgent => crate::api::schema::ErrorBody {
                 code: "agent_not_found".into(),
                 message: "agent target does not currently host an agent".into(),
@@ -457,6 +491,7 @@ pub(super) enum AgentStartError {
 
 pub(super) enum AgentRenameError {
     Target(TerminalTargetError),
+    OwnershipChanged,
     InvalidName,
     NotAgent,
     PendingLaunch,
