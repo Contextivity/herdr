@@ -805,6 +805,19 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// Kernel start ticks identify a process lifetime, not merely its reusable PID.
+pub(crate) fn startup_process_lifetime(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields: Vec<_> = stat
+        .get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .collect();
+    if matches!(*fields.first()?, "Z" | "X") {
+        return None;
+    }
+    Some(fields.get(19)?.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

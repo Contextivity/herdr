@@ -28,6 +28,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "startup" => agent_startup(&args[1..]),
         "explain" => agent_explain(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
@@ -981,6 +982,48 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+fn agent_startup(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr agent startup < request.json (prepare, launch or cleanup)");
+        return Ok(2);
+    }
+    let params: crate::api::schema::AgentStartupParams =
+        match serde_json::from_reader(std::io::stdin().lock()) {
+            Ok(params) => params,
+            Err(err) => {
+                eprintln!("invalid startup request: {err}");
+                return Ok(2);
+            }
+        };
+    let launch = match &params {
+        crate::api::schema::AgentStartupParams::Launch { receipt } => Some(receipt.clone()),
+        _ => None,
+    };
+    let mut response = super::send_request(&Request {
+        id: "cli:agent:startup".into(),
+        method: Method::AgentStartup(params),
+    })?;
+    if response.get("error").is_none() {
+        if let Some(receipt) = launch {
+            let kind = response["result"]["agent"]["agent"]
+                .as_str()
+                .unwrap_or("codex")
+                .to_owned();
+            match wait_for_named_agent(
+                &receipt.name,
+                &receipt.pane_id,
+                Duration::from_secs(60),
+                &kind,
+                &receipt.terminal_id,
+            )? {
+                Ok(agent) => response["result"]["agent"] = agent,
+                Err(error) => return super::print_response(&error),
+            }
+        }
+    }
+    super::print_response(&response)
 }
 
 #[cfg(test)]

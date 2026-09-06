@@ -1570,6 +1570,68 @@
           ],
           "type": "object"
         },
+        "AgentStartupParams": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation": {
+                  "const": "prepare",
+                  "type": "string"
+                },
+                "preparation": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "start": {
+                  "$ref": "#/schemas/request/$defs/AgentStartParams"
+                }
+              },
+              "required": [
+                "operation",
+                "start",
+                "preparation"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation": {
+                  "const": "launch",
+                  "type": "string"
+                },
+                "receipt": {
+                  "$ref": "#/schemas/request/$defs/StartupReceipt"
+                }
+              },
+              "required": [
+                "operation",
+                "receipt"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation": {
+                  "const": "cleanup",
+                  "type": "string"
+                },
+                "receipt": {
+                  "$ref": "#/schemas/request/$defs/StartupReceipt"
+                }
+              },
+              "required": [
+                "operation",
+                "receipt"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -3883,6 +3945,48 @@
           ],
           "type": "string"
         },
+        "StartupReceipt": {
+          "description": "Receipt issued before any startup input is submitted. It is valid only in\nthe issuing daemon lifetime and must be returned unchanged.",
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "shell_lifetime": {
+              "type": "string"
+            },
+            "shell_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket",
+            "pane_id",
+            "workspace_id",
+            "terminal_id",
+            "cwd",
+            "name",
+            "shell_pid",
+            "shell_lifetime"
+          ],
+          "type": "object"
+        },
         "Subscription": {
           "oneOf": [
             {
@@ -5385,6 +5489,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.startup",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentStartupParams"
             }
           },
           "required": [
@@ -9401,6 +9521,26 @@
             },
             {
               "properties": {
+                "receipt": {
+                  "$ref": "#/schemas/success_response/$defs/StartupReceipt"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_startup",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "receipt",
+                "state"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "agent": {
                   "$ref": "#/schemas/success_response/$defs/AgentInfo"
                 },
@@ -10461,6 +10601,48 @@
             "down"
           ],
           "type": "string"
+        },
+        "StartupReceipt": {
+          "description": "Receipt issued before any startup input is submitted. It is valid only in\nthe issuing daemon lifetime and must be returned unchanged.",
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "shell_lifetime": {
+              "type": "string"
+            },
+            "shell_pid": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "ticket": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticket",
+            "pane_id",
+            "workspace_id",
+            "terminal_id",
+            "cwd",
+            "name",
+            "shell_pid",
+            "shell_lifetime"
+          ],
+          "type": "object"
         },
         "TabInfo": {
           "properties": {

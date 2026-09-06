@@ -995,6 +995,14 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+pub(crate) fn startup_process_lifetime(pid: u32) -> Option<String> {
+    let info = process_bsdinfo(pid)?;
+    Some(format!(
+        "{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

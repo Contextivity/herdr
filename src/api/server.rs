@@ -428,6 +428,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::AgentProviderFocus(_) => "agent.provider.focus",
         Method::AgentProviderFocused(_) => "agent.provider.focused",
         Method::AgentFocus(_) => "agent.focus",
+        Method::AgentStartup(_) => "agent.startup",
         Method::AgentStart(_) => "agent.start",
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentWait(_) => "agent.wait",

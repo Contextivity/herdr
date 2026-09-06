@@ -97,6 +97,10 @@ pub enum ResponseResult {
     AgentInfo {
         agent: AgentInfo,
     },
+    AgentStartup {
+        receipt: super::agents::StartupReceipt,
+        state: String,
+    },
     AgentStarted {
         agent: AgentInfo,
         argv: Vec<String>,

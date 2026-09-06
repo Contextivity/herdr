@@ -31,6 +31,8 @@ impl App {
     }
 
     pub(crate) fn shutdown_terminal_runtime(&mut self, terminal_id: crate::terminal::TerminalId) {
+        self.startup_scripts.remove(&terminal_id);
+        self.retire_startup_files(&terminal_id);
         let target = super::TerminalInputTarget {
             terminal_id: terminal_id.clone(),
         };

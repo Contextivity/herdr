@@ -135,6 +135,8 @@ pub enum Method {
     AgentProviderFocused(EmptyParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
+    #[serde(rename = "agent.startup")]
+    AgentStartup(AgentStartupParams),
     #[serde(rename = "agent.start")]
     AgentStart(AgentStartParams),
     #[serde(rename = "agent.prompt")]

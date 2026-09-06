@@ -531,3 +531,11 @@ mod tests {
         );
     }
 }
+
+mod startup;
+pub(crate) use startup::StartupScript;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn startup_process_lifetime(_pid: u32) -> Option<String> {
+    None
+}
