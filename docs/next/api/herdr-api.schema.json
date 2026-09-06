@@ -1499,6 +1499,25 @@
           ],
           "type": "object"
         },
+        "AgentRestoreNameParams": {
+          "properties": {
+            "expected_terminal_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "name",
+            "expected_terminal_id"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -5206,6 +5225,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.restore_name",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentRestoreNameParams"
             }
           },
           "required": [

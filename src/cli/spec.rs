@@ -368,6 +368,13 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("restore-name")
+                .about("Restore a name only on the expected terminal and source binding")
+                .arg(required("target", "TARGET"))
+                .arg(required("name", "NAME"))
+                .arg(option("expected-terminal-id", "ID").required(true)),
+        )
+        .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
                 .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
@@ -1175,6 +1182,29 @@ mod tests {
         assert_eq!(
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn agent_restore_name_requires_terminal_identity() {
+        assert!(super::command()
+            .try_get_matches_from([
+                "herdr",
+                "agent",
+                "restore-name",
+                "w1:p1",
+                "reviewer",
+                "--expected-terminal-id",
+                "term_owned",
+            ])
+            .is_ok());
+        assert!(super::command()
+            .try_get_matches_from(["herdr", "agent", "restore-name", "w1:p1", "reviewer",])
+            .is_err());
+        let old_or_missing_guard = serde_json::json!({"id":"test", "method":"agent.restore_name",
+            "params":{"target":"w1:p1", "name":"reviewer"}});
+        assert!(
+            serde_json::from_value::<crate::api::schema::Request>(old_or_missing_guard).is_err()
         );
     }
 
