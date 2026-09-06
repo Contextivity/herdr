@@ -1213,6 +1213,87 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
+fn live_handoff_schedules_terminal_and_workspace_token_expiry() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "create", "method": "workspace.create", "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let workspace_id = created["result"]["workspace"]["workspace_id"]
+        .as_str()
+        .unwrap();
+    for (method, identity) in [
+        (
+            "pane.report_metadata",
+            serde_json::json!({"pane_id": pane_id}),
+        ),
+        (
+            "workspace.report_metadata",
+            serde_json::json!({"workspace_id": workspace_id}),
+        ),
+    ] {
+        let mut params = identity;
+        params["source"] = serde_json::json!("ttl-test");
+        params["seq"] = serde_json::json!(5);
+        params["ttl_ms"] = serde_json::json!(2000);
+        params["tokens"] = serde_json::json!({"temporary": "expires"});
+        assert_ok(request(
+            &api_socket,
+            serde_json::json!({"id": method, "method": method, "params": params}),
+        ));
+    }
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id": "handoff", "method": "server.live_handoff", "params": {}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let get_tokens = || {
+        let pane = request(
+            &api_socket,
+            serde_json::json!({"id": "pane", "method": "pane.get", "params": {"pane_id": pane_id}}),
+        );
+        let workspace = request(
+            &api_socket,
+            serde_json::json!({"id": "workspace", "method": "workspace.get", "params": {"workspace_id": workspace_id}}),
+        );
+        (
+            pane["result"]["pane"]["tokens"].clone(),
+            workspace["result"]["workspace"]["tokens"].clone(),
+        )
+    };
+    let (pane, workspace) = get_tokens();
+    assert_eq!(pane["temporary"], "expires");
+    assert_eq!(workspace["temporary"], "expires");
+    // Reads alone must not be needed to initialize expiry scheduling.
+    thread::sleep(Duration::from_millis(2200));
+    let (pane, workspace) = get_tokens();
+    assert!(
+        pane.get("temporary").is_none(),
+        "pane TTL survived handoff: {pane}"
+    );
+    assert!(
+        workspace.get("temporary").is_none(),
+        "workspace TTL survived handoff: {workspace}"
+    );
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id": "stop", "method": "server.stop", "params": {}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1248,6 +1329,10 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
         }),
     );
     let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let original_terminal_id = created["result"]["root_pane"]["terminal_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1320,10 +1405,59 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
 
     assert_ok(request(
         &api_socket,
+        serde_json::json!({
+            "id": "test:metadata", "method": "pane.report_metadata",
+            "params": { "pane_id": pane_id, "source": "factory", "seq": 10,
+                "tokens": {"orchestration_id": "handoff-test"} }
+        }),
+    ));
+
+    assert_ok(request(
+        &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
     drop(spawned);
     wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let restored = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:original-identity", "method": "agent.get", "params": {"target": pane_id}
+        }),
+    );
+    assert_eq!(
+        restored["result"]["agent"]["terminal_id"],
+        original_terminal_id
+    );
+    assert_eq!(
+        restored["result"]["agent"]["tokens"]["orchestration_id"],
+        "handoff-test"
+    );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:guarded-name", "method": "agent.restore_name",
+            "params": {"target": pane_id, "name": "reviewer", "expected_terminal_id": original_terminal_id}
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:stale-metadata", "method": "pane.report_metadata",
+            "params": {"pane_id": pane_id, "source": "factory", "seq": 10,
+                "tokens": {"orchestration_id": "stale-overwrite"}}
+        }),
+    ));
+    let after_stale = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:deduplicated", "method": "agent.get", "params": {"target": pane_id}
+        }),
+    );
+    assert_eq!(
+        after_stale["result"]["agent"]["tokens"]["orchestration_id"],
+        "handoff-test"
+    );
 
     assert_ok(request(
         &api_socket,

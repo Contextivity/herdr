@@ -1306,6 +1306,10 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.terminal_id = Some(terminal_id.clone());
+            if let Some(terminal) = self.app.state.terminals.get(terminal_id) {
+                handoff_runtime.metadata = terminal.capture_handoff_metadata();
+            }
             let has_agent_session = self
                 .app
                 .state
@@ -1322,13 +1326,19 @@ impl HeadlessServer {
             .iter()
             .map(|(_, runtime)| runtime.clone())
             .collect();
-        let manifest = crate::server::handoff::manifest_for(
+        let mut manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
             params.expected_protocol,
             params.expected_version,
             self.api_window_title.clone(),
         );
+        for workspace in &self.app.state.workspaces {
+            manifest.workspace_metadata.insert(
+                workspace.id.clone(),
+                crate::handoff_runtime::HandoffMetadata::capture_workspace(workspace),
+            );
+        }
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
@@ -5271,6 +5281,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             &received.manifest.snapshot,
             &mut imports,
         )?;
+        for workspace in &mut app.state.workspaces {
+            if let Some(metadata) = received.manifest.workspace_metadata.remove(&workspace.id) {
+                metadata.restore_workspace(workspace);
+            }
+        }
+        // Restored tokens bypass API updates, which normally arm the expiry timer.
+        app.sync_agent_metadata_deadline();
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;
