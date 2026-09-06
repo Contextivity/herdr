@@ -4853,13 +4853,61 @@ mod tests {
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert!(response.get("error").is_none(), "{response}");
         let submitted = receiver.try_recv().unwrap();
+        #[cfg(unix)]
         assert!(submitted.len() <= 512,
             "startup injected {} bytes before shell readiness; expected only a short source command",
             submitted.len());
+        #[cfg(windows)]
+        assert!(
+            !submitted.is_empty(),
+            "Windows fallback must submit its command"
+        );
         assert!(
             receiver.try_recv().is_err(),
             "startup must enqueue exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_enqueue_acceptance_is_reported_independently() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("enqueue")];
+        app.state.ensure_test_terminals();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].terminal_id(root).unwrap().clone();
+        let (runtime, mut receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        runtime
+            .try_send_bytes(bytes::Bytes::from_static(b"occupied"))
+            .unwrap();
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let params = crate::api::schema::AgentStartParams {
+            name: "worker".into(),
+            kind: "codex".into(),
+            pane_id,
+            args: vec![],
+            timeout_ms: Some(4000),
+        };
+        let mut submitted = true;
+        assert!(app
+            .start_agent_with_source(params.clone(), Some("short-source"), &mut submitted)
+            .is_err());
+        assert!(
+            !submitted,
+            "rejected enqueue must preserve cleanup authority"
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"occupied")
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(app
+            .start_agent_with_source(params, Some("short-source"), &mut submitted)
+            .is_ok());
+        assert!(submitted, "accepted input must never be replayed");
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

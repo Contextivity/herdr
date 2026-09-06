@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
                 missing=api('pane.get',dict(pane_id=pane));assert missing['error']['code']=='pane_not_found',missing
                 assert not Path(receipt['ticket']).exists()
                 retired=api('agent.startup',dict(operation='cleanup',receipt=receipt))
-                assert retired['error']['code']=='startup_ticket_unknown',retired
+                assert retired.get('result',{}).get('state')=='cleaned',retired
                 rows.append(dict(payload_bytes=len(argument),early=True,execution_count=1,exact_arguments=True,exact_preparation=True,duplicate_launch_rejected=True,cleanup='cleaned'))
             # Prepared-but-never-submitted and externally closed tickets must
             # retire their files and preserve sufficient receipt proof for cleanup.
@@ -84,8 +84,29 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
                 assert cleaned.get('result',{}).get('state')=='cleaned',cleaned
                 assert not Path(receipt['ticket']).exists()
                 retired=api('agent.startup',dict(operation='cleanup',receipt=receipt))
-                assert retired['error']['code']=='startup_ticket_unknown',retired
-                rows.append(dict(case='already-absent' if external_close else 'never-submitted',cleanup='cleaned',ticket_retired=True,files_removed=True))
+                assert retired.get('result',{}).get('state')=='cleaned',retired
+                rows.append(dict(case='already-absent' if external_close else 'never-submitted',cleanup='cleaned',cleanup_retry_acknowledged=True,files_removed=True))
+            # Immutable validation rejects before ticket creation; failed preparation
+            # under noclobber still acknowledges shell return and permits safe retry.
+            workspace=api('workspace.create',dict(cwd=str(root),label='noclobber'))['result']
+            pane=workspace['root_pane']['pane_id']
+            for timeout in [0, 3000, 300001]:
+                rejected=api('agent.startup',dict(operation='prepare',start=dict(name='noclobber',kind='codex',pane_id=pane,args=[],timeout_ms=timeout),preparation=[]))
+                assert rejected.get('error',{}).get('code')=='invalid_agent_timeout',rejected
+            def prepare_noclobber():
+                response=api('agent.startup',dict(operation='prepare',start=dict(name='noclobber',kind='codex',pane_id=pane,args=[],timeout_ms=6000),preparation=['set -C; false']))
+                if response.get('error',{}).get('code')=='agent_pane_busy':return None
+                assert 'error' not in response,response
+                return response['result']['receipt']
+            receipt=poll(prepare_noclobber)
+            poll(lambda:(root/f"ready-{receipt['shell_pid']}").exists())
+            assert 'error' not in api('agent.startup',dict(operation='launch',receipt=receipt))
+            poll(lambda:(Path(receipt['ticket'])/'finished').read_text().strip()=='1')
+            for _ in range(3):
+                cleaned=api('agent.startup',dict(operation='cleanup',receipt=receipt))
+                assert cleaned.get('result',{}).get('state')=='cleaned',cleaned
+                assert not Path(receipt['ticket']).exists()
+            rows.append(dict(case='invalid-timeout-and-noclobber',invalid_timeouts_rejected=3,completion_status=1,cleanup_acknowledgements=3))
             # Keep each original receipt unchanged while mutating observed state.
             for scenario in ['foreground', 'background', 'moved']:
                 workspace=api('workspace.create',dict(cwd=str(root),label=scenario))['result']

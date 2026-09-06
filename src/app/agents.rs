@@ -19,6 +19,17 @@ pub(super) fn valid_agent_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
+pub(super) fn validated_start_timeout(
+    timeout_ms: Option<u64>,
+) -> Result<Duration, AgentStartError> {
+    let timeout =
+        Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_AGENT_START_TIMEOUT.as_millis() as u64));
+    if timeout <= AGENT_START_SETTLE_DELAY || timeout > MAX_AGENT_START_TIMEOUT {
+        return Err(AgentStartError::InvalidTimeout);
+    }
+    Ok(timeout)
+}
+
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
@@ -176,14 +187,16 @@ impl App {
         &mut self,
         params: AgentStartParams,
     ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
-        self.start_agent_with_source(params, None)
+        self.start_agent_with_source(params, None, &mut false)
     }
 
     pub(super) fn start_agent_with_source(
         &mut self,
         params: AgentStartParams,
         source: Option<&str>,
+        submitted: &mut bool,
     ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
+        *submitted = false;
         let name = params.name;
         if !valid_agent_name(&name) {
             return Err(AgentStartError::InvalidName);
@@ -244,14 +257,7 @@ impl App {
             .or_else(|| script.as_ref().map(|s| s.source_command.as_str()))
             .unwrap_or(&command);
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, input);
-        let timeout = Duration::from_millis(
-            params
-                .timeout_ms
-                .unwrap_or(DEFAULT_AGENT_START_TIMEOUT.as_millis() as u64),
-        );
-        if timeout <= AGENT_START_SETTLE_DELAY || timeout > MAX_AGENT_START_TIMEOUT {
-            return Err(AgentStartError::InvalidTimeout);
-        }
+        let timeout = validated_start_timeout(params.timeout_ms)?;
 
         let now = Instant::now();
         let terminal = self
@@ -264,6 +270,9 @@ impl App {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
         }
+        // try_send_bytes is an all-or-nothing channel enqueue. No await or API
+        // dispatch occurs here; preserve accepted input even if response assembly fails.
+        *submitted = true;
         if let Some(script) = script {
             self.startup_scripts.insert(terminal_id, script);
         }

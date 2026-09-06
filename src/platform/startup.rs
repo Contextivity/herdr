@@ -82,7 +82,7 @@ impl StartupScript {
         writeln!(file, "{command}\n}}")?;
         writeln!(
             file,
-            "printf '%s\\n' \"$?\" > {}",
+            "printf '%s\\n' \"$?\" >| {}",
             quote(&script.directory.join("finished").to_string_lossy())
         )?;
         file.sync_all()?;
@@ -130,6 +130,28 @@ impl Drop for StartupScript {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn startup_completion_survives_noclobber() {
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            let script = StartupScript::create("sh", "false", &[]).unwrap();
+            let output = std::process::Command::new(shell)
+                .args(["-c", &format!("set -C; {}", script.source_command)])
+                .output()
+                .unwrap();
+            assert!(
+                script.finished(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                std::fs::read_to_string(script.directory.join("finished"))
+                    .unwrap()
+                    .trim(),
+                "1"
+            );
+        }
+    }
 
     #[test]
     fn startup_script_is_private_single_use_and_preserves_quoted_arguments() {

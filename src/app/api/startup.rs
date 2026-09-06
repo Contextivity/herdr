@@ -14,6 +14,7 @@ pub(in crate::app) struct StartupTicket {
     script: Option<StartupScript>,
     submitted: bool,
     closed_at: Option<std::time::Instant>,
+    cleanup_completed: bool,
 }
 
 impl App {
@@ -55,6 +56,9 @@ impl App {
         start: AgentStartParams,
         preparation: Vec<String>,
     ) -> String {
+        if let Err(err) = crate::app::agents::validated_start_timeout(start.timeout_ms) {
+            return encode_error_body(id, self.agent_start_error_body(err));
+        }
         let invalid = || {
             encode_error(
                 id.clone(),
@@ -166,6 +170,7 @@ impl App {
                 script: Some(script),
                 submitted: false,
                 closed_at: None,
+                cleanup_completed: false,
             },
         );
         encode_success(
@@ -215,6 +220,9 @@ impl App {
             );
         }
         let start = ticket.start.clone();
+        if let Err(err) = crate::app::agents::validated_start_timeout(start.timeout_ms) {
+            return encode_error_body(id, self.agent_start_error_body(err));
+        }
         let Some(script) = ticket.script.as_ref() else {
             return encode_error(
                 id,
@@ -223,21 +231,16 @@ impl App {
             );
         };
         let source = script.source_command.clone();
-        // This is recorded before enqueue. Only the explicitly pre-input busy
-        // rejection permits another attempt; all uncertain failures remain held.
+        let mut submitted = false;
+        let result = self.start_agent_with_source(start, Some(&source), &mut submitted);
+        // The synchronous enqueue boundary reports acceptance independently of
+        // response construction. Unknown/transport failures never authorize replay.
         if let Some(ticket) = self.startup_tickets.get_mut(&receipt.ticket) {
-            ticket.submitted = true;
+            ticket.submitted = submitted;
         }
-        match self.start_agent_with_source(start, Some(&source)) {
+        match result {
             Ok((agent, argv)) => encode_success(id, ResponseResult::AgentStarted { agent, argv }),
-            Err(err) => {
-                if matches!(err, crate::app::agents::AgentStartError::TargetBusy(_)) {
-                    if let Some(ticket) = self.startup_tickets.get_mut(&receipt.ticket) {
-                        ticket.submitted = false;
-                    }
-                }
-                encode_error_body(id, self.agent_start_error_body(err))
-            }
+            Err(err) => encode_error_body(id, self.agent_start_error_body(err)),
         }
     }
 
@@ -284,6 +287,22 @@ impl App {
                 "receipt does not match daemon ticket",
             );
         }
+        if self.collect_agent_infos().iter().any(|agent| {
+            agent.name.as_deref() == Some(&receipt.name) && agent.terminal_id != receipt.terminal_id
+        }) {
+            return encode_error(id, "startup_ownership_mismatch", "startup name has rebound");
+        }
+        // Completed cleanup proves a previous operation, not current PID absence.
+        // It must never close again, even before the original child is reaped.
+        if ticket.cleanup_completed {
+            return encode_success(
+                id,
+                ResponseResult::AgentStartup {
+                    receipt,
+                    state: "cleaned".into(),
+                },
+            );
+        }
         let pane_absent = self
             .parse_current_public_pane_id(&receipt.pane_id)
             .is_none();
@@ -297,7 +316,7 @@ impl App {
             });
             if terminal_still_attached
                 || self.terminal_runtimes.get(&ticket.terminal_id).is_some()
-                || crate::platform::process_exists(receipt.shell_pid)
+                || observed_process_exists(receipt.shell_pid)
             {
                 return encode_error(
                     id,
@@ -333,7 +352,11 @@ impl App {
                 return error;
             }
         }
-        self.startup_tickets.remove(&receipt.ticket);
+        if let Some(ticket) = self.startup_tickets.get_mut(&receipt.ticket) {
+            ticket.script.take();
+            ticket.closed_at = Some(std::time::Instant::now());
+            ticket.cleanup_completed = true;
+        }
         encode_success(
             id,
             ResponseResult::AgentStartup {
@@ -342,6 +365,14 @@ impl App {
             },
         )
     }
+}
+
+fn observed_process_exists(pid: u32) -> bool {
+    #[cfg(test)]
+    if let Some(value) = TEST_PROCESS_EXISTS.with(|value| *value.borrow()) {
+        return value;
+    }
+    crate::platform::process_exists(pid)
 }
 
 // Tests can simulate kernel PID reuse without editing the client's receipt or
@@ -356,6 +387,7 @@ fn observed_shell_lifetime(pid: u32) -> Option<String> {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_PROCESS_EXISTS: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
     static TEST_LIFETIME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -368,6 +400,7 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             TEST_LIFETIME.with(|value| *value.borrow_mut() = None);
+            TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = None);
             for (_, runtime) in self.0.terminal_runtimes.drain() {
                 runtime.shutdown();
             }
@@ -407,7 +440,7 @@ mod tests {
             kind: "codex".into(),
             pane_id,
             args: vec![],
-            timeout_ms: Some(1000),
+            timeout_ms: Some(6000),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let receipt: StartupReceipt = loop {
@@ -421,7 +454,46 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
+        // Invalid pre-input timeouts must never create/reserve a ticket.
+        for timeout in [0, 3000, 300001] {
+            let mut invalid = start.clone();
+            invalid.timeout_ms = Some(timeout);
+            let value: serde_json::Value =
+                serde_json::from_str(&app.prepare_startup("invalid".into(), invalid, vec![]))
+                    .unwrap();
+            assert_eq!(value["error"]["code"], "invalid_agent_timeout", "{value}");
+        }
         let terminal_id = app.startup_tickets[&receipt.ticket].terminal_id.clone();
+        // A different terminal acquiring the reserved name cannot strand this
+        // unsubmitted receipt or authorize cleanup of either terminal.
+        let sentinel_id = app.state.workspaces[1].tabs[0]
+            .panes
+            .values()
+            .next()
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&sentinel_id)
+            .unwrap()
+            .agent_name = Some(receipt.name.clone());
+        let rejected: serde_json::Value =
+            serde_json::from_str(&app.launch_startup("conflict".into(), receipt.clone())).unwrap();
+        assert_eq!(rejected["error"]["code"], "agent_name_taken", "{rejected}");
+        assert!(!app.startup_tickets[&receipt.ticket].submitted);
+        let rejected: serde_json::Value =
+            serde_json::from_str(&app.cleanup_startup("conflict".into(), receipt.clone())).unwrap();
+        assert_eq!(
+            rejected["error"]["code"], "startup_ownership_mismatch",
+            "{rejected}"
+        );
+        assert_eq!(app.state.workspaces.len(), 2);
+        app.state
+            .terminals
+            .get_mut(&sentinel_id)
+            .unwrap()
+            .agent_name = None;
         // Positive control makes every refusal below load-bearing.
         assert!(app.startup_shell_only(&app.startup_tickets[&receipt.ticket]));
         for case in ["lifetime", "session", "agent", "name", "binding"] {
@@ -499,8 +571,53 @@ mod tests {
             );
         }
         let response: serde_json::Value =
-            serde_json::from_str(&app.cleanup_startup("cleanup".into(), receipt)).unwrap();
+            serde_json::from_str(&app.cleanup_startup("cleanup".into(), receipt.clone())).unwrap();
         assert_eq!(response["result"]["state"], "cleaned", "{response}");
         assert_eq!(app.state.workspaces.len(), 1);
+        assert!(!std::path::Path::new(&receipt.ticket).exists());
+        // Simulate the kernel observing a reused/live PID without editing either
+        // original receipt or daemon ticket. Completed proof ignores this fact.
+        TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = Some(true));
+        // Immediate retry must not depend on the terminated shell being reaped.
+        for _ in 0..3 {
+            let value: serde_json::Value =
+                serde_json::from_str(&app.cleanup_startup("retry".into(), receipt.clone()))
+                    .unwrap();
+            assert_eq!(value["result"]["state"], "cleaned", "{value}");
+            assert_eq!(app.state.workspaces.len(), 1);
+        }
+        app.state
+            .terminals
+            .get_mut(&sentinel_id)
+            .unwrap()
+            .agent_name = Some(receipt.name.clone());
+        let rebound: serde_json::Value =
+            serde_json::from_str(&app.cleanup_startup("rebound".into(), receipt.clone())).unwrap();
+        assert_eq!(
+            rebound["error"]["code"], "startup_ownership_mismatch",
+            "{rebound}"
+        );
+        assert_eq!(app.state.workspaces.len(), 1);
+        app.state
+            .terminals
+            .get_mut(&sentinel_id)
+            .unwrap()
+            .agent_name = None;
+        TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = None);
+        let mut forged = receipt.clone();
+        forged.shell_lifetime.push('x');
+        let value: serde_json::Value =
+            serde_json::from_str(&app.cleanup_startup("forged".into(), forged)).unwrap();
+        assert_eq!(value["error"]["code"], "startup_ownership_mismatch");
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .closed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(86_401));
+        let expired: serde_json::Value = serde_json::from_str(
+            &app.handle_agent_startup("expired".into(), AgentStartupParams::Cleanup { receipt }),
+        )
+        .unwrap();
+        assert_eq!(expired["error"]["code"], "startup_ticket_unknown");
+        assert!(app.startup_tickets.is_empty());
     }
 }
