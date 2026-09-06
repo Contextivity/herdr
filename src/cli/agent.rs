@@ -1001,25 +1001,37 @@ fn agent_startup(args: &[String]) -> std::io::Result<i32> {
         crate::api::schema::AgentStartupParams::Launch { receipt } => Some(receipt.clone()),
         _ => None,
     };
-    let mut response = super::send_request(&Request {
+    let mut response = match super::send_request(&Request {
         id: "cli:agent:startup".into(),
         method: Method::AgentStartup(params),
-    })?;
+    }) {
+        Ok(response) => response,
+        Err(err) => {
+            return print_agent_transport_error(
+                err,
+                "cli:agent:startup",
+                "agent_start_transport_failed",
+            )
+        }
+    };
     if response.get("error").is_none() {
         if let Some(receipt) = launch {
-            let kind = response["result"]["agent"]["agent"]
-                .as_str()
-                .unwrap_or("codex")
-                .to_owned();
             match wait_for_named_agent(
                 &receipt.name,
                 &receipt.pane_id,
-                Duration::from_secs(60),
-                &kind,
+                Duration::from_millis(receipt.timeout_ms),
+                &receipt.kind,
                 &receipt.terminal_id,
-            )? {
-                Ok(agent) => response["result"]["agent"] = agent,
-                Err(error) => return super::print_response(&error),
+            ) {
+                Ok(Ok(agent)) => response["result"]["agent"] = agent,
+                Ok(Err(error)) => return super::print_response(&error),
+                Err(err) => {
+                    return print_agent_transport_error(
+                        err,
+                        "cli:agent:startup",
+                        "agent_start_transport_failed",
+                    )
+                }
             }
         }
     }

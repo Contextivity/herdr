@@ -307,6 +307,8 @@ pub struct StartupReceipt {
     pub terminal_id: String,
     pub cwd: String,
     pub name: String,
+    pub kind: String,
+    pub timeout_ms: u64,
     pub shell_pid: u32,
     pub shell_lifetime: String,
 }

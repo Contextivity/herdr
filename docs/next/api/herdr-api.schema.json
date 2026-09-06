@@ -3951,6 +3951,9 @@
             "cwd": {
               "type": "string"
             },
+            "kind": {
+              "type": "string"
+            },
             "name": {
               "type": "string"
             },
@@ -3971,6 +3974,11 @@
             "ticket": {
               "type": "string"
             },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -3982,6 +3990,8 @@
             "terminal_id",
             "cwd",
             "name",
+            "kind",
+            "timeout_ms",
             "shell_pid",
             "shell_lifetime"
           ],
@@ -10608,6 +10618,9 @@
             "cwd": {
               "type": "string"
             },
+            "kind": {
+              "type": "string"
+            },
             "name": {
               "type": "string"
             },
@@ -10628,6 +10641,11 @@
             "ticket": {
               "type": "string"
             },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -10639,6 +10657,8 @@
             "terminal_id",
             "cwd",
             "name",
+            "kind",
+            "timeout_ms",
             "shell_pid",
             "shell_lifetime"
           ],

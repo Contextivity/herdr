@@ -56,9 +56,10 @@ impl App {
         start: AgentStartParams,
         preparation: Vec<String>,
     ) -> String {
-        if let Err(err) = crate::app::agents::validated_start_timeout(start.timeout_ms) {
-            return encode_error_body(id, self.agent_start_error_body(err));
-        }
+        let timeout = match crate::app::agents::validated_start_timeout(start.timeout_ms) {
+            Ok(timeout) => timeout,
+            Err(err) => return encode_error_body(id, self.agent_start_error_body(err)),
+        };
         let invalid = || {
             encode_error(
                 id.clone(),
@@ -158,6 +159,8 @@ impl App {
             terminal_id: info.terminal_id,
             cwd,
             name: start.name.clone(),
+            kind: crate::detect::agent_label(kind).to_string(),
+            timeout_ms: timeout.as_millis() as u64,
             shell_pid: pid,
             shell_lifetime: lifetime,
         };
@@ -437,7 +440,7 @@ mod tests {
         let pane_id = app.pane_info(0, pane).unwrap().pane_id;
         let start = AgentStartParams {
             name: "owned".into(),
-            kind: "codex".into(),
+            kind: "cursor-agent".into(),
             pane_id,
             args: vec![],
             timeout_ms: Some(6000),
@@ -448,6 +451,8 @@ mod tests {
                 serde_json::from_str(&app.prepare_startup("prepare".into(), start.clone(), vec![]))
                     .unwrap();
             if value.get("error").is_none() {
+                assert_eq!(value["result"]["receipt"]["kind"], "cursor");
+                assert_eq!(value["result"]["receipt"]["timeout_ms"], 6000);
                 break serde_json::from_value(value["result"]["receipt"].clone()).unwrap();
             }
             assert_eq!(value["error"]["code"], "agent_pane_busy", "{value}");
@@ -462,6 +467,24 @@ mod tests {
                 serde_json::from_str(&app.prepare_startup("invalid".into(), invalid, vec![]))
                     .unwrap();
             assert_eq!(value["error"]["code"], "invalid_agent_timeout", "{value}");
+        }
+        // The launch contract is part of the original receipt proof.
+        for change_kind in [true, false] {
+            let mut forged = receipt.clone();
+            if change_kind {
+                forged.kind = "pi".into();
+            } else {
+                forged.timeout_ms += 1;
+            }
+            for response in [
+                app.launch_startup("forged".into(), forged.clone()),
+                app.cleanup_startup("forged".into(), forged),
+            ] {
+                let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+                assert_eq!(value["error"]["code"], "startup_ownership_mismatch");
+            }
+            assert_eq!(app.startup_tickets[&receipt.ticket].receipt, receipt);
+            assert!(!app.startup_tickets[&receipt.ticket].submitted);
         }
         let terminal_id = app.startup_tickets[&receipt.ticket].terminal_id.clone();
         // A different terminal acquiring the reserved name cannot strand this
