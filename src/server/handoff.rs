@@ -96,10 +96,7 @@ impl HandoffManifest {
                 return Err(invalid());
             }
             if let Some(id) = &pane.terminal_id {
-                let valid = id.as_str().strip_prefix("term_").is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-                });
-                if !valid || !terminal_ids.insert(id) {
+                if !id.is_valid() || !terminal_ids.insert(id) {
                     return Err(invalid());
                 }
             }

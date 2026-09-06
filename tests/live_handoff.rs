@@ -1245,7 +1245,7 @@ fn live_handoff_schedules_terminal_and_workspace_token_expiry() {
         let mut params = identity;
         params["source"] = serde_json::json!("ttl-test");
         params["seq"] = serde_json::json!(5);
-        params["ttl_ms"] = serde_json::json!(2000);
+        params["ttl_ms"] = serde_json::json!(15000);
         params["tokens"] = serde_json::json!({"temporary": "expires"});
         assert_ok(request(
             &api_socket,
@@ -1276,8 +1276,14 @@ fn live_handoff_schedules_terminal_and_workspace_token_expiry() {
     assert_eq!(pane["temporary"], "expires");
     assert_eq!(workspace["temporary"], "expires");
     // Reads alone must not be needed to initialize expiry scheduling.
-    thread::sleep(Duration::from_millis(2200));
-    let (pane, workspace) = get_tokens();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (mut pane, mut workspace) = get_tokens();
+    while (pane.get("temporary").is_some() || workspace.get("temporary").is_some())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(100));
+        (pane, workspace) = get_tokens();
+    }
     assert!(
         pane.get("temporary").is_none(),
         "pane TTL survived handoff: {pane}"

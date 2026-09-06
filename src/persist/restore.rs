@@ -102,6 +102,12 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    // Reserve every imported ID before legacy/missing-runtime fallback can allocate.
+    TerminalId::reserve_imported(
+        imports
+            .values()
+            .filter_map(|runtime| runtime.state.terminal_id.clone()),
+    );
     restore_with_imports_strict(
         snapshot,
         None,
@@ -1004,8 +1010,8 @@ mod tests {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             0
