@@ -34,6 +34,10 @@ impl App {
         id: String,
         params: AgentStartupParams,
     ) -> String {
+        // Inspection never mutates the ticket map, submits input or adopts a process.
+        if let AgentStartupParams::Inspect { receipt } = &params {
+            return self.inspect_startup(id, receipt.clone());
+        }
         // Closed tickets retain receipt proof for a day. Expiration only loses
         // authority (unknown tickets fail closed), never authorizes deletion.
         self.startup_tickets.retain(|_, ticket| {
@@ -45,9 +49,96 @@ impl App {
             AgentStartupParams::Prepare { start, preparation } => {
                 self.prepare_startup(id, start, preparation)
             }
+            AgentStartupParams::Inspect { receipt } => self.inspect_startup(id, receipt),
             AgentStartupParams::Launch { receipt } => self.launch_startup(id, receipt),
             AgentStartupParams::Cleanup { receipt } => self.cleanup_startup(id, receipt),
         }
+    }
+
+    fn inspect_startup(&self, id: String, receipt: StartupReceipt) -> String {
+        let Some(ticket) = self.startup_tickets.get(&receipt.ticket).filter(|ticket| {
+            ticket
+                .closed_at
+                .is_none_or(|closed| closed.elapsed() < std::time::Duration::from_secs(86_400))
+        }) else {
+            return encode_error(
+                id,
+                "startup_ticket_unknown",
+                "original daemon ticket unavailable; retain ownership hold",
+            );
+        };
+        let mismatch = || {
+            encode_error(
+                id.clone(),
+                "startup_ownership_mismatch",
+                "original startup identity is not proven",
+            )
+        };
+        if ticket.receipt != receipt
+            || self.collect_agent_infos().iter().any(|agent| {
+                agent.name.as_deref() == Some(&receipt.name)
+                    && agent.terminal_id != receipt.terminal_id
+            })
+        {
+            return mismatch();
+        }
+        let state = if self
+            .parse_current_public_pane_id(&receipt.pane_id)
+            .is_some()
+        {
+            if !self.startup_location_matches(ticket)
+                || observed_shell_cwd(receipt.shell_pid).as_deref()
+                    != Some(std::path::Path::new(&receipt.cwd))
+                || self
+                    .state
+                    .terminals
+                    .get(&ticket.terminal_id)
+                    .is_none_or(|terminal| {
+                        terminal
+                            .agent_name
+                            .as_deref()
+                            .is_some_and(|name| name != receipt.name)
+                    })
+            {
+                return mismatch();
+            }
+            if !ticket.submitted {
+                if !self.startup_shell_only(ticket) {
+                    return mismatch();
+                }
+                "prepared"
+            } else if ticket.script.as_ref().is_some_and(StartupScript::finished) {
+                if !self.startup_shell_only(ticket) {
+                    return mismatch();
+                }
+                "finished"
+            } else {
+                "submitted"
+            }
+        } else {
+            let attached = self.state.workspaces.iter().any(|workspace| {
+                workspace.tabs.iter().any(|tab| {
+                    tab.panes
+                        .values()
+                        .any(|pane| pane.attached_terminal_id == ticket.terminal_id)
+                })
+            });
+            if ticket.closed_at.is_none()
+                || attached
+                || self.terminal_runtimes.get(&ticket.terminal_id).is_some()
+                || observed_process_exists(receipt.shell_pid)
+            {
+                return mismatch();
+            }
+            "closed"
+        };
+        encode_success(
+            id,
+            ResponseResult::AgentStartup {
+                receipt,
+                state: state.into(),
+            },
+        )
     }
 
     fn prepare_startup(
@@ -370,6 +461,14 @@ impl App {
     }
 }
 
+fn observed_shell_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(value) = TEST_CWD.with(|value| value.borrow().clone()) {
+        return value;
+    }
+    crate::platform::process_cwd(pid)
+}
+
 fn observed_process_exists(pid: u32) -> bool {
     #[cfg(test)]
     if let Some(value) = TEST_PROCESS_EXISTS.with(|value| *value.borrow()) {
@@ -390,6 +489,7 @@ fn observed_shell_lifetime(pid: u32) -> Option<String> {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_CWD: std::cell::RefCell<Option<Option<std::path::PathBuf>>> = const { std::cell::RefCell::new(None) };
     static TEST_PROCESS_EXISTS: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
     static TEST_LIFETIME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -402,6 +502,7 @@ mod tests {
     struct Fixture(App);
     impl Drop for Fixture {
         fn drop(&mut self) {
+            TEST_CWD.with(|value| *value.borrow_mut() = None);
             TEST_LIFETIME.with(|value| *value.borrow_mut() = None);
             TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = None);
             for (_, runtime) in self.0.terminal_runtimes.drain() {
@@ -459,6 +560,51 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
+        // Inspect is observation only: a prepared ticket must never submit input.
+        let inspect: AgentStartupParams = serde_json::from_value(serde_json::json!({
+            "operation": "inspect", "receipt": receipt
+        }))
+        .expect("read-only startup inspection must be supported");
+        let observed: serde_json::Value =
+            serde_json::from_str(&app.handle_agent_startup("inspect".into(), inspect)).unwrap();
+        assert_eq!(observed["result"]["state"], "prepared", "{observed}");
+        assert!(!app.startup_tickets[&receipt.ticket].submitted);
+        assert_eq!(app.state.workspaces.len(), 2);
+        // An unchanged cached presentation directory cannot substitute for live proof.
+        for live_cwd in [
+            None,
+            Some(std::path::PathBuf::from(&receipt.cwd).join("different")),
+        ] {
+            TEST_CWD.with(|value| *value.borrow_mut() = Some(live_cwd));
+            assert_eq!(
+                app.pane_info(0, pane).unwrap().cwd.as_deref(),
+                Some(receipt.cwd.as_str())
+            );
+            let denied: serde_json::Value =
+                serde_json::from_str(&app.inspect_startup("live-cwd".into(), receipt.clone()))
+                    .unwrap();
+            assert_eq!(denied["error"]["code"], "startup_ownership_mismatch");
+            assert_eq!(app.startup_tickets[&receipt.ticket].receipt, receipt);
+            assert!(!app.startup_tickets[&receipt.ticket].submitted);
+        }
+        TEST_CWD.with(|value| *value.borrow_mut() = None);
+        let mut unknown = receipt.clone();
+        unknown.ticket.push_str("-unknown");
+        let unknown: serde_json::Value =
+            serde_json::from_str(&app.inspect_startup("unknown".into(), unknown)).unwrap();
+        assert_eq!(unknown["error"]["code"], "startup_ticket_unknown");
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .submitted = true;
+        let submitted: serde_json::Value =
+            serde_json::from_str(&app.inspect_startup("submitted".into(), receipt.clone()))
+                .unwrap();
+        assert_eq!(submitted["result"]["state"], "submitted");
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .submitted = false;
         // Invalid pre-input timeouts must never create/reserve a ticket.
         for timeout in [0, 3000, 300001] {
             let mut invalid = start.clone();
@@ -477,6 +623,7 @@ mod tests {
                 forged.timeout_ms += 1;
             }
             for response in [
+                app.inspect_startup("forged".into(), forged.clone()),
                 app.launch_startup("forged".into(), forged.clone()),
                 app.cleanup_startup("forged".into(), forged),
             ] {
@@ -568,6 +715,12 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
+            let observed: serde_json::Value =
+                serde_json::from_str(&app.inspect_startup(case.into(), receipt.clone())).unwrap();
+            assert_eq!(
+                observed["error"]["code"], "startup_ownership_mismatch",
+                "{case}: {observed}"
+            );
             let response: serde_json::Value =
                 serde_json::from_str(&app.cleanup_startup(case.into(), receipt.clone())).unwrap();
             assert_eq!(
@@ -598,9 +751,16 @@ mod tests {
         assert_eq!(response["result"]["state"], "cleaned", "{response}");
         assert_eq!(app.state.workspaces.len(), 1);
         assert!(!std::path::Path::new(&receipt.ticket).exists());
+        TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = Some(false));
+        let closed: serde_json::Value =
+            serde_json::from_str(&app.inspect_startup("closed".into(), receipt.clone())).unwrap();
+        assert_eq!(closed["result"]["state"], "closed", "{closed}");
         // Simulate the kernel observing a reused/live PID without editing either
         // original receipt or daemon ticket. Completed proof ignores this fact.
         TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = Some(true));
+        let reused: serde_json::Value =
+            serde_json::from_str(&app.inspect_startup("reused".into(), receipt.clone())).unwrap();
+        assert_eq!(reused["error"]["code"], "startup_ownership_mismatch");
         // Immediate retry must not depend on the terminated shell being reaped.
         for _ in 0..3 {
             let value: serde_json::Value =
