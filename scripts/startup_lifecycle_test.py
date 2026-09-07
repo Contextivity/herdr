@@ -45,14 +45,14 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
                 assert 'error' not in prepared,prepared
                 receipt=prepared['result']['receipt']
                 observed=api('agent.startup',dict(operation='inspect',receipt=receipt))
-                assert observed.get('result')==dict(receipt=receipt,state='prepared'),observed
+                assert observed.get('result')==dict(type='agent_startup',receipt=receipt,state='prepared'),observed
                 assert 'ready' not in marker.read_text(),'test did not exercise early initialization'
                 launched=api('agent.startup',dict(operation='launch',receipt=receipt));assert 'error' not in launched,launched
                 again=api('agent.startup',dict(operation='launch',receipt=receipt));assert again['error']['code']=='startup_already_submitted',again
                 poll(result.exists)
                 poll(lambda:(Path(receipt['ticket'])/'finished').read_text().strip())
                 observed=api('agent.startup',dict(operation='inspect',receipt=receipt))
-                assert observed.get('result')==dict(receipt=receipt,state='finished'),observed
+                assert observed.get('result')==dict(type='agent_startup',receipt=receipt,state='finished'),observed
                 actual=result.read_text().splitlines()
                 assert len(actual)==1,actual
                 assert json.loads(actual[0])==dict(argv=['--',argument],preparation=prep)
