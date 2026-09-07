@@ -986,7 +986,9 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
 
 fn agent_startup(args: &[String]) -> std::io::Result<i32> {
     if !args.is_empty() {
-        eprintln!("usage: herdr agent startup < request.json (prepare, launch or cleanup)");
+        eprintln!(
+            "usage: herdr agent startup < request.json (prepare, launch, inspect or cleanup)"
+        );
         return Ok(2);
     }
     let params: crate::api::schema::AgentStartupParams =

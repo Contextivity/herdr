@@ -316,6 +316,9 @@ pub struct StartupReceipt {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentStartupParams {
+    Inspect {
+        receipt: StartupReceipt,
+    },
     Prepare {
         start: AgentStartParams,
         preparation: Vec<String>,
