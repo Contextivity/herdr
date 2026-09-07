@@ -996,3 +996,36 @@ Herdr has a protocol version for client/server compatibility. Protocol changes
 are reviewed for release compatibility.
 
 Check the server protocol with `ping` or `herdr status` before depending on new behavior. Handle unknown fields gracefully.
+
+## Receipted agent startup
+
+On Linux and macOS with a supported POSIX shell, `agent.startup` provides
+`prepare`, `launch`, and `cleanup` operations. Prepare accepts `start` (the
+`agent.start` parameters) and a `preparation` string array. It writes a private
+launch script and returns a receipt. Persist that receipt before sending
+`launch` with the unchanged receipt. Timeout values must be greater than 3000 ms
+and at most 300000 ms; invalid values are rejected during prepare.
+
+The daemon submits only a short source command to the terminal. Accepted input
+is never submitted again for the same ticket. A transport timeout does not
+prove that input was rejected: retain the receipt and do not replay the launch.
+
+Send `cleanup` with the original receipt to recover a failed startup. Cleanup
+requires the original terminal binding and shell lifetime, an observed
+shell-only foreground and session, and no conflicting agent ownership. Once a
+submitted script returns, its completion marker permits these checks. A missing
+completion marker remains uncertain. Externally closed terminals require
+absence of the original terminal runtime, attachment, and shell PID.
+
+Successful cleanup immediately retires the private launch files. The issuing
+daemon retains the completed receipt for 24 hours, so an exact cleanup retry
+returns `state: "cleaned"` if the response was lost. This acknowledges the
+previous operation without closing resources again or requiring the old PID to
+remain absent. A rebound agent name is refused. Expiration is checked on later
+startup requests and retries do not extend it. External-close tombstones are
+separate from completed cleanup proof and still require the absence checks.
+
+Receipts are held in daemon memory. Unknown, modified, expired, or pre-restart
+receipts cannot authorize cleanup. Process observations do not freeze the OS
+process tree; arbitrary concurrent shell input and process creation are outside
+this recovery guarantee.

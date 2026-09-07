@@ -296,3 +296,34 @@ pub struct AgentSessionInfo {
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
 }
+
+/// Receipt issued before any startup input is submitted. It is valid only in
+/// the issuing daemon lifetime and must be returned unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StartupReceipt {
+    pub ticket: String,
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub terminal_id: String,
+    pub cwd: String,
+    pub name: String,
+    pub kind: String,
+    pub timeout_ms: u64,
+    pub shell_pid: u32,
+    pub shell_lifetime: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentStartupParams {
+    Prepare {
+        start: AgentStartParams,
+        preparation: Vec<String>,
+    },
+    Launch {
+        receipt: StartupReceipt,
+    },
+    Cleanup {
+        receipt: StartupReceipt,
+    },
+}

@@ -11,6 +11,7 @@ mod panes;
 pub(crate) mod plugins;
 mod responses;
 mod session;
+pub(super) mod startup;
 mod tabs;
 mod workspaces;
 mod worktrees;
@@ -1125,6 +1126,7 @@ impl App {
             Method::AgentProviderFocused(_) => {
                 return self.handle_agent_provider_focused(request.id)
             }
+            Method::AgentStartup(params) => return self.handle_agent_startup(request.id, params),
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(params) => return self.handle_agent_prompt(request.id, params),
             Method::AgentWait(_) => {

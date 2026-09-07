@@ -133,6 +133,12 @@ jobs:
           cache-bin: false
           key: ${{ matrix.os }}
 
+      - name: Install Linux test shells
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zsh
+
       - name: Run checks
         if: matrix.kind == 'unix'
         run: just ci '${{ matrix.nextest_filter }}'

@@ -995,9 +995,54 @@ pub fn process_exists(pid: u32) -> bool {
     }
 }
 
+pub(crate) fn startup_process_lifetime(pid: u32) -> Option<String> {
+    startup_lifetime_from_bsdinfo(&process_bsdinfo(pid)?)
+}
+
+fn startup_lifetime_from_bsdinfo(info: &libc::proc_bsdinfo) -> Option<String> {
+    if info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    Some(format!(
+        "{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_lifetime_rejects_zombie_record() {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        info.pbi_start_tvsec = 123;
+        info.pbi_start_tvusec = 456;
+        info.pbi_status = libc::SRUN;
+        assert_eq!(
+            startup_lifetime_from_bsdinfo(&info).as_deref(),
+            Some("123:456")
+        );
+        info.pbi_status = libc::SZOMB;
+        assert_eq!(startup_lifetime_from_bsdinfo(&info), None);
+    }
+
+    #[test]
+    fn startup_lifetime_rejects_unreaped_exited_child() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // waitid(WNOWAIT) observes exit without reaping the zombie record.
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result =
+            unsafe { libc::waitid(libc::P_PID, pid, &mut status, libc::WEXITED | libc::WNOWAIT) };
+        let lifetime = startup_process_lifetime(pid);
+        child.wait().unwrap();
+        assert_eq!(result, 0);
+        assert_eq!(lifetime, None, "exited shells must lose startup ownership");
+    }
 
     #[test]
     fn nofile_target_raises_low_soft_limit_to_cap_when_hard_is_unlimited() {

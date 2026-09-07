@@ -105,6 +105,8 @@ pub struct App {
     pub(crate) direct_graphics_available: bool,
     pub(crate) pixel_mouse_available: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    startup_tickets: HashMap<String, api::startup::StartupTicket>,
+    startup_scripts: HashMap<crate::terminal::TerminalId, crate::platform::StartupScript>,
     pub event_tx: mpsc::Sender<AppEvent>,
     pub(crate) event_rx: mpsc::Receiver<AppEvent>,
     pub(crate) api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
@@ -770,6 +772,8 @@ impl App {
             direct_graphics_available: false,
             pixel_mouse_available: false,
             terminal_runtimes: restored_terminal_runtimes,
+            startup_scripts: HashMap::new(),
+            startup_tickets: HashMap::new(),
             event_tx,
             event_rx,
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
@@ -4820,6 +4824,90 @@ mod tests {
         assert_eq!(response["error"]["code"], "agent_pane_unavailable");
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+    }
+
+    #[tokio::test]
+    async fn startup_long_quoted_argv_never_enters_the_pty_input_queue() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("startup-transport");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let (runtime, mut receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "startup-transport".into(),
+            method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
+                name: "worker".into(),
+                kind: "codex".into(),
+                pane_id,
+                args: vec!["quoted ' value $literal ".repeat(400)],
+                timeout_ms: Some(4_000),
+            }),
+        });
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+        let submitted = receiver.try_recv().unwrap();
+        #[cfg(unix)]
+        assert!(submitted.len() <= 512,
+            "startup injected {} bytes before shell readiness; expected only a short source command",
+            submitted.len());
+        #[cfg(windows)]
+        assert!(
+            !submitted.is_empty(),
+            "Windows fallback must submit its command"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "startup must enqueue exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_enqueue_acceptance_is_reported_independently() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("enqueue")];
+        app.state.ensure_test_terminals();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = app.pane_info(0, root).unwrap().pane_id;
+        let terminal_id = app.state.workspaces[0].terminal_id(root).unwrap().clone();
+        let (runtime, mut receiver) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 1);
+        runtime
+            .try_send_bytes(bytes::Bytes::from_static(b"occupied"))
+            .unwrap();
+        app.terminal_runtimes.insert(terminal_id, runtime);
+        let params = crate::api::schema::AgentStartParams {
+            name: "worker".into(),
+            kind: "codex".into(),
+            pane_id,
+            args: vec![],
+            timeout_ms: Some(4000),
+        };
+        let mut submitted = true;
+        assert!(app
+            .start_agent_with_source(params.clone(), Some("short-source"), &mut submitted)
+            .is_err());
+        assert!(
+            !submitted,
+            "rejected enqueue must preserve cleanup authority"
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            bytes::Bytes::from_static(b"occupied")
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(app
+            .start_agent_with_source(params, Some("short-source"), &mut submitted)
+            .is_ok());
+        assert!(submitted, "accepted input must never be replayed");
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

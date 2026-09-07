@@ -412,6 +412,9 @@ fn agent_command() -> Command {
                 .arg(flag("takeover")),
         )
         .subcommand(
+            Command::new("startup").about("Prepare, submit once, or clean a receipted startup using a JSON request on stdin")
+        )
+        .subcommand(
             Command::new("start")
                 .about("Start a supported interactive agent in an existing pane")
                 .override_usage(
