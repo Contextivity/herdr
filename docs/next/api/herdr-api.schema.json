@@ -1576,6 +1576,23 @@
               "additionalProperties": false,
               "properties": {
                 "operation": {
+                  "const": "inspect",
+                  "type": "string"
+                },
+                "receipt": {
+                  "$ref": "#/schemas/request/$defs/StartupReceipt"
+                }
+              },
+              "required": [
+                "operation",
+                "receipt"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "operation": {
                   "const": "prepare",
                   "type": "string"
                 },

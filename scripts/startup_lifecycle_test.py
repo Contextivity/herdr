@@ -92,6 +92,30 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
                 retired=api('agent.startup',dict(operation='cleanup',receipt=receipt))
                 assert retired.get('result',{}).get('state')=='cleaned',retired
                 rows.append(dict(case='already-absent' if external_close else 'never-submitted',cleanup='cleaned',cleanup_retry_acknowledged=True,files_removed=True))
+            # The presentation cwd may remain stale after a builtin cd without OSC.
+            workspace=api('workspace.create',dict(cwd=str(root),label='live-cwd'))['result']
+            pane=workspace['root_pane']['pane_id']
+            def prepare_cwd():
+                response=api('agent.startup',dict(operation='prepare',start=dict(name='live-cwd',kind='codex',pane_id=pane,args=[],timeout_ms=6000),preparation=[]))
+                if response.get('error',{}).get('code')=='agent_pane_busy':return None
+                assert 'error' not in response,response
+                return response['result']['receipt']
+            receipt=poll(prepare_cwd)
+            poll(lambda:(root/f"ready-{receipt['shell_pid']}").exists())
+            changed=root/'changed-cwd';changed.mkdir()
+            marker=root/'live-cwd-marker'
+            command="precmd_functions=(); printf '\\033]7;file://localhost"+receipt['cwd']+"\\007'; cd "+shlex.quote(str(changed))+"; pwd > "+shlex.quote(str(marker))
+            sent=api('pane.send_input',dict(pane_id=pane,text=command,keys=['Enter']))
+            assert 'error' not in sent,sent
+            poll(lambda:marker.exists() and marker.read_text().strip()==str(changed.resolve()))
+            cached=api('pane.get',dict(pane_id=pane))['result']['pane']['cwd']
+            assert cached==receipt['cwd'],('fixture requires stale presentation cwd',cached,receipt)
+            denied=api('agent.startup',dict(operation='inspect',receipt=receipt))
+            assert denied.get('error',{}).get('code')=='startup_ownership_mismatch',denied
+            assert Path(receipt['ticket']).exists()
+            assert_sentinel()
+            assert 'error' not in api('workspace.close',dict(workspace_id=workspace['workspace']['workspace_id']))
+            rows.append(dict(case='live-cwd',unchanged_receipt=True,stale_reported_cwd=True,changed_live_cwd=True,refused=True))
             # Immutable validation rejects before ticket creation; failed preparation
             # under noclobber still acknowledges shell return and permits safe retry.
             workspace=api('workspace.create',dict(cwd=str(root),label='noclobber'))['result']

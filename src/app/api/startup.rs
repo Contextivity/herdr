@@ -82,13 +82,13 @@ impl App {
         {
             return mismatch();
         }
-        let state = if let Some((ws, pane)) = self.parse_current_public_pane_id(&receipt.pane_id) {
+        let state = if self
+            .parse_current_public_pane_id(&receipt.pane_id)
+            .is_some()
+        {
             if !self.startup_location_matches(ticket)
-                || self
-                    .pane_info(ws, pane)
-                    .and_then(|info| info.cwd)
-                    .as_deref()
-                    != Some(&receipt.cwd)
+                || observed_shell_cwd(receipt.shell_pid).as_deref()
+                    != Some(std::path::Path::new(&receipt.cwd))
                 || self
                     .state
                     .terminals
@@ -461,6 +461,14 @@ impl App {
     }
 }
 
+fn observed_shell_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(value) = TEST_CWD.with(|value| value.borrow().clone()) {
+        return value;
+    }
+    crate::platform::process_cwd(pid)
+}
+
 fn observed_process_exists(pid: u32) -> bool {
     #[cfg(test)]
     if let Some(value) = TEST_PROCESS_EXISTS.with(|value| *value.borrow()) {
@@ -481,6 +489,7 @@ fn observed_shell_lifetime(pid: u32) -> Option<String> {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_CWD: std::cell::RefCell<Option<Option<std::path::PathBuf>>> = const { std::cell::RefCell::new(None) };
     static TEST_PROCESS_EXISTS: std::cell::RefCell<Option<bool>> = const { std::cell::RefCell::new(None) };
     static TEST_LIFETIME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -493,6 +502,7 @@ mod tests {
     struct Fixture(App);
     impl Drop for Fixture {
         fn drop(&mut self) {
+            TEST_CWD.with(|value| *value.borrow_mut() = None);
             TEST_LIFETIME.with(|value| *value.borrow_mut() = None);
             TEST_PROCESS_EXISTS.with(|value| *value.borrow_mut() = None);
             for (_, runtime) in self.0.terminal_runtimes.drain() {
@@ -560,6 +570,24 @@ mod tests {
         assert_eq!(observed["result"]["state"], "prepared", "{observed}");
         assert!(!app.startup_tickets[&receipt.ticket].submitted);
         assert_eq!(app.state.workspaces.len(), 2);
+        // An unchanged cached presentation directory cannot substitute for live proof.
+        for live_cwd in [
+            None,
+            Some(std::path::PathBuf::from(&receipt.cwd).join("different")),
+        ] {
+            TEST_CWD.with(|value| *value.borrow_mut() = Some(live_cwd));
+            assert_eq!(
+                app.pane_info(0, pane).unwrap().cwd.as_deref(),
+                Some(receipt.cwd.as_str())
+            );
+            let denied: serde_json::Value =
+                serde_json::from_str(&app.inspect_startup("live-cwd".into(), receipt.clone()))
+                    .unwrap();
+            assert_eq!(denied["error"]["code"], "startup_ownership_mismatch");
+            assert_eq!(app.startup_tickets[&receipt.ticket].receipt, receipt);
+            assert!(!app.startup_tickets[&receipt.ticket].submitted);
+        }
+        TEST_CWD.with(|value| *value.borrow_mut() = None);
         let mut unknown = receipt.clone();
         unknown.ticket.push_str("-unknown");
         let unknown: serde_json::Value =
