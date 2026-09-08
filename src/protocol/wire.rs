@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+// The previous Contextivity fork published a different private wire under 22.
+// Endpoint generation 1 remains unchanged and interoperable with upstream.
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -1732,6 +1734,20 @@ mod tests {
     // payload is also append-closed.
 
     // ---- Round-trip: ClientMessage ----
+
+    #[test]
+    fn previous_fork_private_protocol_is_not_accepted() {
+        assert!(matches!(
+            check_client_version(22),
+            VersionCheck::Incompatible(_)
+        ));
+        // Legacy Hello included encoding, keybindings and launch-mode fields.
+        // Full-frame decoding rejects the extra fields before any terminal input.
+        let legacy_payload = [0u8, 22, 80, 24, 8, 16, 0, 0, 0];
+        let mut framed = (legacy_payload.len() as u32).to_le_bytes().to_vec();
+        framed.extend_from_slice(&legacy_payload);
+        assert!(read_message::<_, ClientMessage>(&mut framed.as_slice(), MAX_FRAME_SIZE).is_err());
+    }
 
     #[test]
     fn client_hello_roundtrip() {

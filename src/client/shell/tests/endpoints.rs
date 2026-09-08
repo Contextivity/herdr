@@ -1203,3 +1203,166 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
 }
+
+#[test]
+fn orchestration_groups_preserve_endpoint_identity_and_navigation_order() {
+    use crate::api::schema::AgentStatus;
+    let (mut state, remote_id) = state_with_remote();
+    let grouped = |pane: &str, group: &str| {
+        let mut value = agent(pane, AgentStatus::Idle, 1);
+        value.pane_id = pane.into();
+        value.tokens = vec![
+            ("orchestration_id".into(), group.into()),
+            ("orchestration_label".into(), format!("Task {group}")),
+        ];
+        value
+    };
+    let mut local = snapshot();
+    local.agents = vec![grouped("a1", "A"), grouped("b1", "B"), grouped("a2", "A")];
+    state.set_snapshot(Box::new(local));
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.agents = vec![grouped("a1", "A")];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    let targets = super::super::aggregate_navigation::online_agent_targets(
+        &state.endpoints,
+        crate::config::AgentPanelSortConfig::Spaces,
+    );
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.pane_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a1", "a2", "b1", "a1"]
+    );
+    assert_eq!(targets[0].endpoint_id, ClientEndpointId::Local);
+    assert_eq!(targets[3].endpoint_id, remote_id);
+
+    let frame = state.compose(140, 60).unwrap();
+    let text = frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Task A · 2"), "{text}");
+    assert!(text.contains("Task A · 1"), "{text}");
+    assert!(text.contains("Task B · 1"), "{text}");
+    let hit_ids = state
+        .hits
+        .endpoint_agents
+        .iter()
+        .map(|(_, endpoint, pane)| (endpoint.clone(), pane.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        hit_ids,
+        targets
+            .iter()
+            .map(|target| (target.endpoint_id.clone(), target.pane_id.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn orchestration_grouping_preserves_ungrouped_priority_and_explicit_views() {
+    use crate::api::schema::AgentStatus;
+    use crate::config::AgentPanelSortConfig;
+    let mut value = snapshot();
+    let mut first = agent("first", AgentStatus::Idle, 1);
+    first.pane_id = "first".into();
+    first.tokens = vec![("orchestration_id".into(), "A".into())];
+    let mut ungrouped = agent("free", AgentStatus::Working, 2);
+    ungrouped.pane_id = "free".into();
+    let mut last = first.clone();
+    last.pane_id = "last".into();
+    value.agents = vec![first, ungrouped, last];
+    let order = |snapshot: &ClientShellSnapshot, sort| {
+        super::super::agent_sidebar::ordered_agent_pane_ids(snapshot, sort)
+    };
+    assert_eq!(
+        order(&value, AgentPanelSortConfig::Spaces),
+        vec!["first", "last", "free"]
+    );
+    assert_eq!(
+        order(&value, AgentPanelSortConfig::Priority),
+        vec!["free", "first", "last"]
+    );
+    value.agent_view_label = Some("explicit".into());
+    value.agent_order = vec!["last".into(), "free".into(), "first".into()];
+    assert_eq!(
+        order(&value, AgentPanelSortConfig::Spaces),
+        value.agent_order
+    );
+}
+
+#[test]
+fn orchestration_headers_disappear_with_removed_agents_and_are_not_pane_targets() {
+    use crate::api::schema::AgentStatus;
+    let mut config = Config::default();
+    config.ui.sidebar.agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let mut value = snapshot();
+    let mut worker = agent("Worker", AgentStatus::Done, 1);
+    worker.tokens = vec![
+        ("orchestration_id".into(), "owned".into()),
+        ("orchestration_label".into(), "Delivery".into()),
+    ];
+    value.agents = vec![worker];
+    state.set_snapshot(Box::new(value.clone()));
+    state.set_pane_surface(surface());
+    let frame = state.compose(100, 40).unwrap();
+    let header_y = frame
+        .cells
+        .chunks(frame.width as usize)
+        .position(|row| {
+            row.iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>()
+                .contains("Delivery · 1")
+        })
+        .unwrap() as u16;
+    assert_eq!(state.hits.agents.len(), 1);
+    assert!(state.hits.agents.iter().all(|(rect, _)| rect.y > header_y));
+    value.agents.clear();
+    state.set_snapshot(Box::new(value));
+    let frame = state.compose(100, 40).unwrap();
+    assert!(!frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>()
+        .contains("Delivery"));
+    assert!(state.hits.agents.is_empty());
+}
+
+#[test]
+#[ignore = "manual fixed-geometry grouping scale profile"]
+fn orchestration_render_scale_profile() {
+    use crate::api::schema::AgentStatus;
+    for count in [1, 15, 500] {
+        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let mut value = snapshot();
+        value.agents = (0..count)
+            .map(|index| {
+                let mut worker = agent(&format!("worker-{index}"), AgentStatus::Working, index);
+                worker.pane_id = format!("pane-{index}");
+                worker.tokens = vec![("orchestration_id".into(), format!("task-{}", index % 5))];
+                worker
+            })
+            .collect();
+        state.set_snapshot(Box::new(value));
+        state.set_pane_surface(surface());
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(state.compose(140, 60).unwrap());
+        }
+        eprintln!(
+            "grouped agents={count} geometry=140x60 mean_us={}",
+            started.elapsed().as_micros() / 100
+        );
+    }
+}

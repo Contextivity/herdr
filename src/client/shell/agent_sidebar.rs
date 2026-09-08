@@ -15,6 +15,7 @@ pub(super) struct AgentRow {
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    pub(super) group_header: Option<String>,
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -42,6 +43,24 @@ pub(super) fn ordered_agent_pane_ids(
                 std::cmp::Reverse(agent.state_change_seq),
             )
         });
+    }
+    if sort == crate::config::AgentPanelSortConfig::Spaces {
+        // Keep each orchestration contiguous in first-seen order. Unmanaged
+        // agents retain their own positions; endpoint ordering is owned above us.
+        let mut groups = HashMap::new();
+        let mut rank = 0;
+        let mut ranked = agents
+            .into_iter()
+            .map(|agent| {
+                let group_rank = orchestration_token(agent, "orchestration_id")
+                    .map(|id| *groups.entry(id).or_insert(rank))
+                    .unwrap_or(rank);
+                rank += 1;
+                (group_rank, agent)
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        agents = ranked.into_iter().map(|(_, agent)| agent).collect();
     }
     agents
         .into_iter()
@@ -79,10 +98,11 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
+        AgentRow::height,
         |buffer, rect, row, hits| {
-            hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            let agent_rect = render_group_header(buffer, rect, row, config);
+            hits.agents.push((agent_rect, row.pane_id.clone()));
+            render_agent_row(buffer, agent_rect, row, config);
         },
     );
 }
@@ -239,6 +259,17 @@ pub(super) fn agent_rows(
     config: &ClientShellConfig,
     machine: Option<&str>,
 ) -> Vec<AgentRow> {
+    let grouped = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
+        && snapshot.agent_view_label.is_none();
+    let mut counts = HashMap::new();
+    if grouped {
+        for agent in &snapshot.agents {
+            if let Some(id) = orchestration_token(agent, "orchestration_id") {
+                *counts.entry(id).or_insert(0usize) += 1;
+            }
+        }
+    }
+    let mut previous_group = None;
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .filter_map(|pane_id| {
@@ -301,7 +332,16 @@ pub(super) fn agent_rows(
                 },
                 state_text,
             );
+            let group = grouped
+                .then(|| orchestration_token(agent, "orchestration_id"))
+                .flatten();
+            let group_header = group.filter(|id| Some(*id) != previous_group).map(|id| {
+                let label = orchestration_token(agent, "orchestration_label").unwrap_or(id);
+                format!("{label} · {}", counts.get(id).copied().unwrap_or_default())
+            });
+            previous_group = group;
             Some(AgentRow {
+                group_header,
                 pane_id: agent.pane_id.clone(),
                 status: agent.agent_status,
                 focused: agent.focused,
@@ -393,5 +433,49 @@ fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str 
         AgentStatus::Done => "done",
         AgentStatus::Working => "working",
         AgentStatus::Idle | AgentStatus::Unknown => "idle",
+    }
+}
+
+fn orchestration_token<'a>(
+    agent: &'a crate::protocol::ClientShellAgent,
+    key: &str,
+) -> Option<&'a str> {
+    agent
+        .tokens
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+impl AgentRow {
+    pub(super) fn height(&self) -> usize {
+        self.rows.len().max(1) + usize::from(self.group_header.is_some())
+    }
+}
+
+/// Headers are presentation only and never become pane input targets.
+pub(super) fn render_group_header(
+    buffer: &mut Buffer,
+    rect: Rect,
+    row: &AgentRow,
+    config: &ClientShellConfig,
+) -> Rect {
+    if let Some(label) = row.group_header.as_deref().filter(|_| rect.height > 0) {
+        Paragraph::new(Line::from(format!(" {label}")))
+            .style(
+                Style::default()
+                    .fg(config.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .render(Rect::new(rect.x, rect.y, rect.width, 1), buffer);
+        Rect::new(
+            rect.x,
+            rect.y.saturating_add(1),
+            rect.width,
+            rect.height.saturating_sub(1),
+        )
+    } else {
+        rect
     }
 }

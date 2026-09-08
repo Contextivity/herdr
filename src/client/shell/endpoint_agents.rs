@@ -70,9 +70,11 @@ pub(super) fn render_expanded(
         config,
         agent_scroll,
         hits,
-        |row| row.agent.rows.len(),
+        |row| row.agent.height(),
         |buffer, rect, row, hits| {
-            super::agent_sidebar::render_agent_row(buffer, rect, &row.agent, config);
+            let agent_rect =
+                super::agent_sidebar::render_group_header(buffer, rect, &row.agent, config);
+            super::agent_sidebar::render_agent_row(buffer, agent_rect, &row.agent, config);
             if row.stale {
                 buffer.set_style(
                     rect,
@@ -81,8 +83,11 @@ pub(super) fn render_expanded(
                         .add_modifier(Modifier::DIM),
                 );
             }
-            hits.endpoint_agents
-                .push((rect, row.endpoint_id.clone(), row.agent.pane_id.clone()));
+            hits.endpoint_agents.push((
+                agent_rect,
+                row.endpoint_id.clone(),
+                row.agent.pane_id.clone(),
+            ));
         },
     );
 }
