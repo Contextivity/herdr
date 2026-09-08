@@ -216,6 +216,15 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
             assert listing['result']['workspaces']==[],listing
             print(json.dumps(dict(final_workspace_count=0,private_launch_directories=len(list(root.glob('herdr-start-*'))))),flush=True)
             assert not list(root.glob('herdr-start-*'))
+        except Exception:
+            # Capture only this disposable fixture, before its server is stopped.
+            # A shell-initialization failure otherwise loses its useful evidence.
+            for workspace in api('workspace.list',{})['result']['workspaces']:
+                print(json.dumps(dict(failed_workspace=workspace)),flush=True)
+            if 'pane' in locals():
+                print(json.dumps(dict(failed_pane_output=api('pane.read',dict(pane_id=pane,source='recent',lines=40)))),flush=True)
+            print((root/'server.log').read_text()[-3000:],flush=True)
+            raise
         finally:
             stopped=subprocess.run([str(BINARY),'server','stop'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
             try:server.wait(timeout=15)

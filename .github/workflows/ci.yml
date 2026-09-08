@@ -141,7 +141,9 @@ jobs:
 
       - name: Verify real startup transport and cleanup
         if: matrix.kind == 'unix'
-        run: TMPDIR=/tmp python3 scripts/startup_lifecycle_test.py --binary target/debug/herdr
+        run: |
+          cargo build --locked --bin herdr
+          TMPDIR=/tmp python3 scripts/startup_lifecycle_test.py --binary target/debug/herdr
 
       - name: Run Windows checks
         if: matrix.kind == 'windows'
