@@ -40,12 +40,13 @@ pub(crate) fn accept_sequence(
     Ok(true)
 }
 
-/// Handoff-only wire representation. None means permanent; expired deadlines stay expiring.
+/// Same-boot handoff deadlines. None means permanent, never an unreadable clock.
 #[cfg(unix)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HandoffToken {
     value: String,
-    expires_at: Option<std::time::SystemTime>,
+    expires_at: Option<Duration>,
 }
 
 impl MetadataTokens {
@@ -53,7 +54,7 @@ impl MetadataTokens {
     pub(crate) fn capture_handoff(
         &self,
         now: Instant,
-        wall: std::time::SystemTime,
+        monotonic: Option<Duration>,
     ) -> HashMap<String, HandoffToken> {
         self.entries
             .iter()
@@ -61,7 +62,7 @@ impl MetadataTokens {
                 let expires_at = match token.expires_at {
                     None => None,
                     Some(deadline) => {
-                        Some(wall.checked_add(deadline.checked_duration_since(now)?)?)
+                        Some(monotonic?.checked_add(deadline.checked_duration_since(now)?)?)
                     }
                 };
                 Some((
@@ -79,7 +80,7 @@ impl MetadataTokens {
     pub(crate) fn restore_handoff(
         tokens: HashMap<String, HandoffToken>,
         now: Instant,
-        wall: std::time::SystemTime,
+        monotonic: Option<Duration>,
     ) -> Self {
         let entries = tokens
             .into_iter()
@@ -87,7 +88,7 @@ impl MetadataTokens {
                 let expires_at = match token.expires_at {
                     None => None,
                     Some(deadline) => {
-                        let remaining = deadline.duration_since(wall).ok()?;
+                        let remaining = deadline.checked_sub(monotonic?)?;
                         if remaining.is_zero() {
                             return None;
                         }
@@ -187,7 +188,7 @@ mod tests {
     #[test]
     fn handoff_tokens_count_transfer_time_and_never_revive_expired_tokens() {
         let now = Instant::now();
-        let wall = std::time::UNIX_EPOCH + Duration::from_secs(100);
+        let monotonic = Duration::from_secs(100);
         let mut tokens = MetadataTokens::default();
         tokens.patch(
             patch(&[("short", Some("one"))]),
@@ -200,14 +201,70 @@ mod tests {
             now,
         );
         tokens.patch(patch(&[("permanent", Some("three"))]), None, now);
-        let transfer = tokens.capture_handoff(now, wall);
+        let transfer = tokens.capture_handoff(now, Some(monotonic));
         let json = serde_json::to_string(&transfer).unwrap();
         let transfer = serde_json::from_str(&json).unwrap();
-        let restored =
-            MetadataTokens::restore_handoff(transfer, now, wall + Duration::from_secs(3));
+        let restored = MetadataTokens::restore_handoff(
+            transfer,
+            now,
+            Some(monotonic + Duration::from_secs(3)),
+        );
         assert!(!restored.contains_key("short"));
         assert!(restored.contains_key("permanent"));
         assert_eq!(restored.next_expiry(), Some(now + Duration::from_secs(7)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_clock_rollback_does_not_revive_expired_token() {
+        let now = Instant::now();
+        let monotonic = Duration::from_secs(100);
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[("short", Some("one"))]),
+            Some(Duration::from_secs(2)),
+            now,
+        );
+        // A wall-clock rollback cannot enter the new transfer contract.
+        let transfer = tokens.capture_handoff(now, Some(monotonic));
+        let restored = MetadataTokens::restore_handoff(
+            transfer,
+            now + Duration::from_secs(3),
+            Some(monotonic + Duration::from_secs(3)),
+        );
+        assert!(!restored.contains_key("short"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_unavailable_clock_and_overflow_drop_only_expiring_tokens() {
+        let now = Instant::now();
+        let mut tokens = MetadataTokens::default();
+        tokens.patch(
+            patch(&[("temporary", Some("one"))]),
+            Some(Duration::from_secs(2)),
+            now,
+        );
+        tokens.patch(patch(&[("permanent", Some("two"))]), None, now);
+        for clock in [None, Some(Duration::MAX)] {
+            let transfer = tokens.capture_handoff(now, clock);
+            assert_eq!(transfer.len(), 1);
+            assert!(transfer.contains_key("permanent"));
+        }
+        let transfer = tokens.capture_handoff(now, Some(Duration::from_secs(100)));
+        let restored = MetadataTokens::restore_handoff(transfer, now, None);
+        assert!(!restored.contains_key("temporary"));
+        assert!(restored.contains_key("permanent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_rejects_wall_clock_deadlines_instead_of_making_them_permanent() {
+        let legacy = serde_json::json!({
+            "value": "temporary",
+            "expires_at": {"secs_since_epoch": 100, "nanos_since_epoch": 0}
+        });
+        assert!(serde_json::from_value::<HandoffToken>(legacy).is_err());
     }
 
     #[test]
