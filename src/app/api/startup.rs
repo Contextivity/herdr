@@ -59,12 +59,12 @@ impl App {
     pub(crate) fn capture_handoff_startup_tickets(&self) -> Vec<HandoffStartupTicket> {
         self.startup_tickets
             .values()
-            .filter_map(|ticket| {
+            .map(|ticket| {
                 let script = ticket.script.as_ref().map(|script| HandoffStartupScript {
                     directory: ticket.receipt.ticket.clone(),
                     source_command: script.source_command.clone(),
                 });
-                Some(HandoffStartupTicket {
+                HandoffStartupTicket {
                     receipt: ticket.receipt.clone(),
                     terminal_id: ticket.terminal_id.clone(),
                     start: ticket.start.clone(),
@@ -74,7 +74,7 @@ impl App {
                         .closed_at
                         .and_then(|closed| u64::try_from(closed.elapsed().as_millis()).ok()),
                     cleanup_completed: ticket.cleanup_completed,
-                })
+                }
             })
             .collect()
     }
