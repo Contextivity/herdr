@@ -533,9 +533,13 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        #[cfg(unix)]
         let imported_terminal_id = imported_runtime
             .as_ref()
             .and_then(|runtime| runtime.state.terminal_id.clone());
+        #[cfg(not(unix))]
+        let imported_terminal_id: Option<TerminalId> = None;
+        #[cfg(unix)]
         let imported_metadata = imported_runtime
             .as_ref()
             .map(|runtime| runtime.state.metadata.clone());
