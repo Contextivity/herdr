@@ -901,7 +901,9 @@ mod tests {
         if let Some(binary) = option_env!("CARGO_BIN_EXE_herdr") {
             let binary = Path::new(binary);
             assert!(is_test_herdr_binary(binary));
-            assert!(!is_test_herdr_binary(&binary.with_file_name("unrelated-herdr")));
+            assert!(!is_test_herdr_binary(
+                &binary.with_file_name("unrelated-herdr")
+            ));
         }
     }
 }
