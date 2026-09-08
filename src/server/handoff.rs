@@ -104,8 +104,12 @@ impl HandoffManifest {
         }
         let mut tickets = std::collections::HashSet::new();
         for ticket in &self.startup_tickets {
+            // Retained receipts acknowledge past cleanup; they must survive
+            // handoff without claiming ownership of a nonexistent live terminal.
+            let retired = ticket.closed_at_elapsed_ms.is_some() && ticket.script.is_none();
             if !ticket.terminal_id.is_valid()
-                || !terminals.contains(&ticket.terminal_id)
+                || (!terminals.contains(&ticket.terminal_id) && !retired)
+                || (ticket.cleanup_completed && !retired)
                 || ticket.receipt.terminal_id != ticket.terminal_id.to_string()
                 || ticket.receipt.ticket.is_empty()
                 || !tickets.insert(ticket.receipt.ticket.clone())
@@ -611,5 +615,37 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+    }
+
+    #[test]
+    fn retired_receipts_need_no_live_terminal_but_cannot_carry_launch_authority() {
+        let mut manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None);
+        let ticket = serde_json::from_value(serde_json::json!({
+            "receipt": {"ticket":"/tmp/retained-ticket", "pane_id":"w1:p1",
+                "workspace_id":"w1", "terminal_id":"term_abcd", "cwd":"/tmp",
+                "name":"retired", "kind":"codex", "timeout_ms":60000,
+                "shell_pid":42, "shell_lifetime":"original"},
+            "terminal_id":"term_abcd", "start":{"name":"retired", "kind":"codex",
+                "pane_id":"w1:p1", "args":[]}, "submitted":false,
+            "closed_at_elapsed_ms":1, "cleanup_completed":true
+        }))
+        .unwrap();
+        manifest.startup_tickets.push(ticket);
+        assert!(manifest.validate().is_ok());
+        manifest.startup_tickets[0].closed_at_elapsed_ms = None;
+        assert!(manifest.validate().is_err());
+        manifest.startup_tickets[0].closed_at_elapsed_ms = Some(1);
+        manifest.startup_tickets[0].script = Some(
+            serde_json::from_value(serde_json::json!({
+                "directory":"/tmp/retained-ticket", "source_command":"do not execute"
+            }))
+            .unwrap(),
+        );
+        assert!(manifest.validate().is_err());
+        manifest.startup_tickets[0].script = None;
+        manifest
+            .startup_tickets
+            .push(manifest.startup_tickets[0].clone());
+        assert!(manifest.validate().is_err());
     }
 }

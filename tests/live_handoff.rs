@@ -586,6 +586,31 @@ fn live_handoff_transfers_startup_receipt_authority() {
             "params":{"operation":"cleanup", "receipt":receipt}}),
     );
     assert_eq!(cleaned["result"]["state"], "cleaned", "{cleaned}");
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:handoff-again", "method":"server.live_handoff", "params":{}}),
+    ));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let cleaned_again = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:cleanup-again", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":receipt}}),
+    );
+    assert_eq!(
+        cleaned_again["result"]["state"], "cleaned",
+        "{cleaned_again}"
+    );
+    let mut changed_receipt = receipt.clone();
+    changed_receipt["terminal_id"] = serde_json::json!("term_ffffffff");
+    let rejected = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:changed-receipt", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":changed_receipt}}),
+    );
+    assert_eq!(
+        rejected["error"]["code"], "startup_ownership_mismatch",
+        "{rejected}"
+    );
     let _ = request(
         &api_socket,
         serde_json::json!({"id":"ticket:stop", "method":"server.stop", "params":{}}),

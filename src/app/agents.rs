@@ -31,6 +31,13 @@ pub(crate) fn validated_start_timeout(
 }
 
 impl App {
+    #[cfg(unix)]
+    pub(crate) fn has_pending_ordinary_startup(&self) -> bool {
+        self.startup_scripts
+            .values()
+            .any(crate::platform::StartupScript::pending)
+    }
+
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
             .workspaces
@@ -247,7 +254,13 @@ impl App {
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
-        let input = source.unwrap_or(&command);
+        let script = if source.is_none() {
+            crate::platform::StartupScript::for_interactive(&shell_name, &command)
+                .map_err(|err| AgentStartError::InputFailed(err.to_string()))?
+        } else {
+            None
+        };
+        let input = startup_input(source, &command, script.as_ref());
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, input);
         let timeout = validated_start_timeout(params.timeout_ms)?;
 
@@ -261,6 +274,9 @@ impl App {
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
+        }
+        if let Some(script) = script {
+            self.startup_scripts.insert(terminal_id, script);
         }
         *submitted = true;
         if let Some(session) = persisted_agent_session {
@@ -463,6 +479,16 @@ impl App {
     }
 }
 
+fn startup_input<'a>(
+    source: Option<&'a str>,
+    command: &'a str,
+    script: Option<&'a crate::platform::StartupScript>,
+) -> &'a str {
+    source
+        .or_else(|| script.map(|script| script.source_command.as_str()))
+        .unwrap_or(command)
+}
+
 pub(crate) fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
@@ -522,6 +548,8 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::startup_input;
     use super::valid_agent_name;
 
     #[test]
@@ -541,5 +569,23 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_start_uses_the_short_script_source_for_large_commands() {
+        let command = format!("agent {}", "x".repeat(8_000));
+        let script = crate::platform::StartupScript::for_interactive("sh", &command)
+            .unwrap()
+            .expect("POSIX shells use private startup scripts");
+
+        assert_eq!(
+            startup_input(None, &command, Some(&script)),
+            script.source_command
+        );
+        assert_eq!(
+            startup_input(Some("native source"), &command, None),
+            "native source"
+        );
     }
 }

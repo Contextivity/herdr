@@ -112,6 +112,14 @@ impl StartupScript {
             .is_some_and(|value| value.trim().parse::<u8>().is_ok())
     }
 
+    /// A source command is still queued if the launch file has not yet been
+    /// unlinked by the shell. Once unlinked, the shell owns execution and the
+    /// daemon may hand off without deleting the script mid-startup.
+    #[cfg(unix)]
+    pub(crate) fn pending(&self) -> bool {
+        self.directory.join("launch").exists()
+    }
+
     #[cfg(unix)]
     pub(crate) fn from_handoff(directory: PathBuf, source_command: String) -> Self {
         Self {
@@ -159,6 +167,7 @@ mod tests {
     fn startup_completion_survives_noclobber() {
         for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
             let script = StartupScript::create("sh", "false", &[]).unwrap();
+            assert!(script.pending());
             let output = std::process::Command::new(shell)
                 .args(["-c", &format!("set -C; {}", script.source_command)])
                 .output()
@@ -168,6 +177,7 @@ mod tests {
                 "{shell}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            assert!(!script.pending());
             assert_eq!(
                 std::fs::read_to_string(script.directory.join("finished"))
                     .unwrap()

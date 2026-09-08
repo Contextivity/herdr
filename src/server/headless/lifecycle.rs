@@ -27,6 +27,13 @@ impl HeadlessServer {
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
         info!("starting live handoff");
+        if self.app.has_pending_ordinary_startup() {
+            self.handoff_in_progress = false;
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "live handoff is unavailable while an ordinary agent startup is queued",
+            ));
+        }
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
         let token = format!(

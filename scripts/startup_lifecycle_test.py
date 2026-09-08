@@ -1,4 +1,4 @@
-import json, os, shutil, socket, subprocess, tempfile, time
+import json, os, shutil, socket, subprocess, tempfile, time, threading
 from pathlib import Path
 import argparse
 parser=argparse.ArgumentParser(description='Isolated native startup transport and cleanup regression')
@@ -12,13 +12,14 @@ def poll(predicate,seconds=10):
         time.sleep(.03)
     raise AssertionError('bounded condition timed out')
 with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
-    root=Path(tmp); env={k:v for k,v in os.environ.items() if not k.startswith('HERDR_')}
+    # macOS aliases /tmp to /private/tmp; compare one physical cwd throughout.
+    root=Path(tmp).resolve(); env={k:v for k,v in os.environ.items() if not k.startswith('HERDR_')}
     env.update(XDG_CONFIG_HOME=str(root/'config'),XDG_STATE_HOME=str(root/'state'),
         HERDR_SOCKET_PATH=str(root/'server.sock'),HERDR_CLIENT_SOCKET_PATH=str(root/'client.sock'),
         HERDR_CONFIG_PATH=str(root/'config.toml'),ZDOTDIR=str(root),TMPDIR=str(root),SHELL=shutil.which('zsh'))
     (root/'config.toml').write_text('[terminal]\ndefault_shell = "'+shutil.which('zsh')+'"\n[update]\nversion_check = false\n')
     (root/'record.py').write_text('import os,sys,json\nwith open(os.environ["TEST_RESULT"],"a") as f: f.write(json.dumps(dict(argv=sys.argv[1:], preparation=os.environ.get("PREPARED")))+"\\n")\n')
-    (root/'.zshrc').write_text('zmodload zsh/datetime\nif [[ -n "$TEST_MARKER" ]]; then\n print begin > "$TEST_MARKER"\n launch_begin=$EPOCHREALTIME\n while (( EPOCHREALTIME - launch_begin < 2 )); do :; done\n print ready >> "$TEST_MARKER"\nfi\nPS1="READY> "\ncodex() { python3 '+str(root/'record.py')+' "$@"; }\nprint ready > '+str(root)+'/ready-$$\n')
+    (root/'.zshrc').write_text('zmodload zsh/datetime\nif [[ -n "$TEST_MARKER" ]]; then\n print begin > "$TEST_MARKER"\n launch_begin=$EPOCHREALTIME\n while (( EPOCHREALTIME - launch_begin < ${TEST_DELAY:-2} )); do :; done\n print ready >> "$TEST_MARKER"\nfi\nPS1="READY> "\ncodex() { python3 '+str(root/'record.py')+' "$@"; }\nprint ready > '+str(root)+'/ready-$$\n')
     def api(method,params):
         with socket.socket(socket.AF_UNIX) as sock:
             sock.settimeout(12);sock.connect(str(root/'server.sock'))
@@ -68,6 +69,34 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
                 retired=api('agent.startup',dict(operation='cleanup',receipt=receipt))
                 assert retired.get('result',{}).get('state')=='cleaned',retired
                 rows.append(dict(payload_bytes=len(argument),early=True,execution_count=1,exact_arguments=True,exact_preparation=True,duplicate_launch_rejected=True,cleanup='cleaned'))
+            # Ordinary agent.start must also avoid the canonical PTY input limit.
+            # Hold zsh initialization so handoff races the genuinely queued source.
+            for size in [1000, 8000]:
+                marker=root/f'ordinary-marker-{size}';result=root/f'ordinary-result-{size}'
+                workspace=api('workspace.create',dict(cwd=str(root),label=f'ordinary-{size}',
+                    env=dict(TEST_MARKER=str(marker),TEST_RESULT=str(result),TEST_DELAY='4')))
+                pane=workspace['result']['root_pane']['pane_id'];poll(marker.exists)
+                argument=('x'*size)+" ' quoted $literal /space path";reply={}
+                def start_ordinary():
+                    try: reply['response']=api('agent.start',dict(name=f'ordinary-{size}',kind='codex',
+                        pane_id=pane,args=['--',argument],timeout_ms=6000))
+                    except Exception as exc: reply['error']=str(exc)
+                worker=threading.Thread(target=start_ordinary);worker.start()
+                try:
+                    poll(lambda:any(a.get('name')==f'ordinary-{size}' for a in api('agent.list',{})['result']['agents']),seconds=2)
+                    held=api('server.live_handoff',{})
+                    assert held.get('error',{}).get('code')=='handoff_failed',held
+                    assert 'ordinary agent startup is queued' in held['error']['message'],held
+                    poll(result.exists)
+                finally: worker.join(timeout=15)
+                assert not worker.is_alive() and 'error' not in reply,reply
+                assert 'error' not in reply['response'],reply
+                actual=result.read_text().splitlines();assert len(actual)==1,actual
+                assert json.loads(actual[0])==dict(argv=['--',argument],preparation=None)
+                assert 'error' not in api('workspace.close',dict(workspace_id=workspace['result']['workspace']['workspace_id']))
+                assert_sentinel()
+                rows.append(dict(case='ordinary-start',payload_bytes=len(argument),execution_count=1,
+                    exact_arguments=True,pending_handoff_rejected=True,sentinel_preserved=True))
             # Prepared-but-never-submitted and externally closed tickets must
             # retire their files and preserve sufficient receipt proof for cleanup.
             for external_close in [False, True]:
