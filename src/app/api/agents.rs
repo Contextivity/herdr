@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentPromptParams, AgentRenameParams, AgentRestoreNameParams, AgentSendKeysParams,
+    AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -59,6 +59,22 @@ impl App {
             Err(err) => return encode_error_body(id, self.agent_rename_error_body(err)),
         };
 
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_restore_name(
+        &mut self,
+        id: String,
+        params: AgentRestoreNameParams,
+    ) -> String {
+        let agent = match self.restore_agent_name(
+            &params.target,
+            params.name,
+            &params.expected_terminal_id,
+        ) {
+            Ok(agent) => agent,
+            Err(err) => return encode_error_body(id, self.agent_rename_error_body(err)),
+        };
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
@@ -722,5 +738,44 @@ mod tests {
                 Some("shell-pane")
             );
         }
+    }
+
+    #[test]
+    fn agent_restore_name_requires_the_expected_terminal_and_current_name() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Working);
+        let target = app.public_pane_id(0, pane_id).unwrap();
+        let denied = app.handle_agent_restore_name(
+            "restore:wrong".into(),
+            AgentRestoreNameParams {
+                target: target.clone(),
+                name: "reviewer".into(),
+                expected_terminal_id: "term_wrong".into(),
+            },
+        );
+        let denied: crate::api::schema::ErrorResponse = serde_json::from_str(&denied).unwrap();
+        assert_eq!(denied.error.code, "agent_ownership_changed");
+        let restored = app.handle_agent_restore_name(
+            "restore:ok".into(),
+            AgentRestoreNameParams {
+                target,
+                name: "reviewer".into(),
+                expected_terminal_id: terminal_id.to_string(),
+            },
+        );
+        let restored: SuccessResponse = serde_json::from_str(&restored).unwrap();
+        assert!(matches!(restored.result, ResponseResult::AgentInfo { .. }));
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("reviewer")
+        );
     }
 }

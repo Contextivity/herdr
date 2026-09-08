@@ -144,14 +144,21 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
-        let app = app::App::new_from_handoff(
+        let mut app = app::App::new_from_handoff(
             &loaded_config.config,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
             api_rx,
             event_hub.clone(),
             &received.manifest.snapshot,
             &mut imports,
+            received.manifest.startup_tickets.clone(),
         )?;
+        for workspace in &mut app.state.workspaces {
+            if let Some(metadata) = received.manifest.workspace_metadata.remove(&workspace.id) {
+                metadata.restore_workspace(workspace);
+            }
+        }
+        app.sync_agent_metadata_deadline();
         crate::server::handoff::report_restored(&mut received.stream)?;
         if std::env::var("HERDR_TEST_HANDOFF_IMPORT_FAIL").as_deref() == Ok("after_restored") {
             return Err(io::Error::other(

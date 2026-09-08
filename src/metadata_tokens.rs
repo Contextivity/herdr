@@ -14,6 +14,16 @@ pub(crate) struct MetadataTokens {
 
 pub(crate) const MAX_SEQUENCE_SOURCES: usize = 32;
 
+/// Handoff-only token representation. Deadlines use wall time solely while
+/// crossing the process boundary; they are converted back to `Instant` on
+/// import and expired values are discarded.
+#[cfg(unix)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HandoffToken {
+    value: String,
+    expires_at: Option<std::time::SystemTime>,
+}
+
 pub(crate) fn sequence_is_fresh(
     sequences: &HashMap<String, u64>,
     source: &str,
@@ -41,6 +51,63 @@ pub(crate) fn accept_sequence(
 }
 
 impl MetadataTokens {
+    #[cfg(unix)]
+    pub(crate) fn capture_handoff(
+        &self,
+        now: Instant,
+        wall: std::time::SystemTime,
+    ) -> HashMap<String, HandoffToken> {
+        self.entries
+            .iter()
+            .filter_map(|(key, token)| {
+                let expires_at = match token.expires_at {
+                    None => None,
+                    Some(deadline) => {
+                        Some(wall.checked_add(deadline.checked_duration_since(now)?)?)
+                    }
+                };
+                Some((
+                    key.clone(),
+                    HandoffToken {
+                        value: token.value.clone(),
+                        expires_at,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff(
+        tokens: HashMap<String, HandoffToken>,
+        now: Instant,
+        wall: std::time::SystemTime,
+    ) -> Self {
+        let entries = tokens
+            .into_iter()
+            .filter_map(|(key, token)| {
+                let expires_at = match token.expires_at {
+                    None => None,
+                    Some(deadline) => {
+                        let remaining = deadline.duration_since(wall).ok()?;
+                        if remaining.is_zero() {
+                            return None;
+                        }
+                        Some(now.checked_add(remaining)?)
+                    }
+                };
+                Some((
+                    key,
+                    MetadataToken {
+                        value: token.value,
+                        expires_at,
+                    },
+                ))
+            })
+            .collect();
+        Self { entries }
+    }
+
     pub(crate) fn patch(
         &mut self,
         patch: HashMap<String, Option<String>>,

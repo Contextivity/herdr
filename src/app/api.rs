@@ -1059,6 +1059,9 @@ impl App {
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
             Method::AgentStartup(params) => return self.handle_agent_startup(request.id, params),
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
+            Method::AgentRestoreName(params) => {
+                return self.handle_agent_restore_name(request.id, params)
+            }
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
                 return self.handle_agent_view_clear(request.id, params)

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub(crate) struct StartupScript {
     directory: PathBuf,
     pub(crate) source_command: String,
+    owns_files: bool,
 }
 
 impl StartupScript {
@@ -54,6 +55,7 @@ impl StartupScript {
         let script = Self {
             directory,
             source_command: format!(". {quoted}"),
+            owns_files: true,
         };
         // Darwin's canonical queue is small. Leave ample room for newline and
         // optional terminal framing; reject an excessively long TMPDIR.
@@ -109,6 +111,22 @@ impl StartupScript {
             .ok()
             .is_some_and(|value| value.trim().parse::<u8>().is_ok())
     }
+
+    pub(crate) fn from_handoff(directory: PathBuf, source_command: String) -> Self {
+        Self {
+            directory,
+            source_command,
+            owns_files: false,
+        }
+    }
+
+    pub(crate) fn assume_handoff_ownership(&mut self) {
+        self.owns_files = true;
+    }
+
+    pub(crate) fn relinquish_handoff_ownership(&mut self) {
+        self.owns_files = false;
+    }
 }
 
 #[cfg(unix)]
@@ -118,6 +136,9 @@ fn quote(value: &str) -> String {
 
 impl Drop for StartupScript {
     fn drop(&mut self) {
+        if !self.owns_files {
+            return;
+        }
         // Never recursively sweep TMPDIR or other tickets.
         for name in ["launch", "finished"] {
             let _ = std::fs::remove_file(self.directory.join(name));
@@ -203,5 +224,20 @@ mod tests {
             drop(script);
             assert!(!directory.exists());
         }
+    }
+
+    #[test]
+    fn imported_startup_script_does_not_clean_up_before_handoff_commit() {
+        let mut original = StartupScript::create("sh", "true", &[]).unwrap();
+        let directory = original.directory.clone();
+        let mut imported =
+            StartupScript::from_handoff(directory.clone(), original.source_command.clone());
+        drop(imported);
+        assert!(directory.join("launch").exists());
+        imported = StartupScript::from_handoff(directory.clone(), original.source_command.clone());
+        imported.assume_handoff_ownership();
+        drop(imported);
+        assert!(!directory.exists());
+        original.relinquish_handoff_ownership();
     }
 }
