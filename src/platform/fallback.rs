@@ -1,3 +1,9 @@
+/// Match this platform's Rust `Instant` timebase across a local handoff.
+#[cfg(unix)]
+pub(crate) fn handoff_monotonic_time() -> Option<std::time::Duration> {
+    super::unix_common::handoff_monotonic_time(libc::CLOCK_MONOTONIC)
+}
+
 use std::path::PathBuf;
 use std::process::Command;
 
