@@ -424,6 +424,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentExplain(_) => "agent.explain",
         Method::AgentSendKeys(_) => "agent.send_keys",
         Method::AgentRename(_) => "agent.rename",
+        Method::AgentRestoreName(_) => "agent.restore_name",
         Method::AgentViewSet(_) => "agent.view.set",
         Method::AgentViewClear(_) => "agent.view.clear",
         Method::AgentFocus(_) => "agent.focus",

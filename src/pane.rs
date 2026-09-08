@@ -1868,6 +1868,8 @@ impl PaneRuntime {
         let (rows, cols, cell_width_px, cell_height_px) = self.current_size.get();
         crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
+            terminal_id: None,
+            metadata: Default::default(),
             child_pid,
             rows,
             cols,
@@ -2091,6 +2093,7 @@ impl PaneRuntime {
             input_state,
             terminal_title,
             initial_history_ansi,
+            ..
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;

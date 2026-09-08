@@ -103,6 +103,24 @@ impl App {
         target: &str,
         name: Option<String>,
     ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
+        self.rename_agent_target_checked(target, name, None)
+    }
+
+    pub(super) fn restore_agent_name(
+        &mut self,
+        target: &str,
+        name: String,
+        expected_terminal_id: &str,
+    ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
+        self.rename_agent_target_checked(target, Some(name), Some(expected_terminal_id))
+    }
+
+    fn rename_agent_target_checked(
+        &mut self,
+        target: &str,
+        name: Option<String>,
+        expected_terminal_id: Option<&str>,
+    ) -> Result<crate::api::schema::AgentInfo, AgentRenameError> {
         let resolved = self
             .resolve_agent_target(target)
             .map_err(AgentRenameError::Target)?;
@@ -132,6 +150,16 @@ impl App {
                 target: target.to_string(),
             }));
         };
+        if let Some(expected) = expected_terminal_id {
+            if resolved.terminal_id != expected
+                || terminal
+                    .agent_name
+                    .as_ref()
+                    .is_some_and(|current| Some(current) != normalized_name.as_ref())
+            {
+                return Err(AgentRenameError::OwnershipChanged);
+            }
+        }
         if terminal.managed_agent_launch_pending() {
             return Err(AgentRenameError::PendingLaunch);
         }
@@ -345,6 +373,10 @@ impl App {
     ) -> crate::api::schema::ErrorBody {
         match err {
             AgentRenameError::Target(err) => self.agent_target_error_body(err),
+            AgentRenameError::OwnershipChanged => crate::api::schema::ErrorBody {
+                code: "agent_ownership_changed".into(),
+                message: "agent terminal or name ownership changed; retry from a fresh agent record".into(),
+            },
             AgentRenameError::InvalidName => crate::api::schema::ErrorBody {
                 code: "invalid_agent_name".into(),
                 message: INVALID_AGENT_NAME_MESSAGE.into(),
@@ -478,6 +510,7 @@ pub(super) enum AgentStartError {
 
 pub(super) enum AgentRenameError {
     Target(TerminalTargetError),
+    OwnershipChanged,
     InvalidName,
     NotAgent,
     PendingLaunch,

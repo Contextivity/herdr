@@ -532,6 +532,68 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn live_handoff_transfers_startup_receipt_authority() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let workspace = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:workspace", "method":"workspace.create",
+            "params":{"cwd":"/tmp", "focus":false}}),
+    );
+    assert_ok(workspace.clone());
+    let pane_id = workspace["result"]["root_pane"]["pane_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let prepared = loop {
+        let response = request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:prepare", "method":"agent.startup",
+                "params":{"operation":"prepare", "start":{"name":"handoff-ticket",
+                    "kind":"codex", "pane_id":pane_id, "args":[], "timeout_ms":60000},
+                    "preparation":[]}}),
+        );
+        if response.get("result").is_some() {
+            break response;
+        }
+        assert_eq!(response["error"]["code"], "agent_pane_busy", "{response}");
+        assert!(
+            Instant::now() < deadline,
+            "shell did not settle: {response}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let receipt = prepared["result"]["receipt"].clone();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:handoff", "method":"server.live_handoff", "params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let inspected = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:inspect", "method":"agent.startup",
+            "params":{"operation":"inspect", "receipt":receipt}}),
+    );
+    assert_eq!(inspected["result"]["state"], "prepared", "{inspected}");
+    let cleaned = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:cleanup", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":receipt}}),
+    );
+    assert_eq!(cleaned["result"]["state"], "cleaned", "{cleaned}");
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:stop", "method":"server.stop", "params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_server_holds_one_pty_master_fd_per_pane() {
     let _lock = test_lock();
     let base = unique_test_dir();

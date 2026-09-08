@@ -54,6 +54,48 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
+    #[cfg(unix)]
+    pub(crate) fn capture_handoff_metadata(&self) -> crate::handoff_runtime::HandoffMetadata {
+        let now = Instant::now();
+        let wall = std::time::SystemTime::now();
+        crate::handoff_runtime::HandoffMetadata {
+            tokens: self.metadata_tokens.capture_handoff(now, wall),
+            sequences: self.metadata_report_sequences.clone(),
+            sequence_agents: self
+                .metadata_report_agents
+                .iter()
+                .map(|(source, agent)| {
+                    (
+                        source.clone(),
+                        crate::detect::agent_label(*agent).to_string(),
+                    )
+                })
+                .collect(),
+            token_sequence_sources: self.metadata_token_sequence_sources.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff_metadata(
+        &mut self,
+        metadata: crate::handoff_runtime::HandoffMetadata,
+    ) {
+        self.metadata_tokens = crate::metadata_tokens::MetadataTokens::restore_handoff(
+            metadata.tokens,
+            Instant::now(),
+            std::time::SystemTime::now(),
+        );
+        self.metadata_report_sequences = metadata.sequences;
+        self.metadata_report_agents = metadata
+            .sequence_agents
+            .into_iter()
+            .filter_map(|(source, label)| {
+                crate::detect::parse_canonical_agent_label(&label).map(|agent| (source, agent))
+            })
+            .collect();
+        self.metadata_token_sequence_sources = metadata.token_sequence_sources;
+    }
+
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }

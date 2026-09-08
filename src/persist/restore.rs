@@ -102,6 +102,11 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    crate::terminal::TerminalId::reserve_imported(
+        imports
+            .values()
+            .filter_map(|runtime| runtime.state.terminal_id.clone()),
+    );
     restore_with_imports_strict(
         snapshot,
         None,
@@ -528,6 +533,12 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        let imported_terminal_id = imported_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.state.terminal_id.clone());
+        let imported_metadata = imported_runtime
+            .as_ref()
+            .map(|runtime| runtime.state.metadata.clone());
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -627,7 +638,7 @@ fn restore_tab(
 
         match runtime_result {
             Ok(runtime) => {
-                let terminal_id = TerminalId::alloc();
+                let terminal_id = imported_terminal_id.unwrap_or_else(TerminalId::alloc);
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
@@ -659,6 +670,10 @@ fn restore_tab(
                         false,
                         std::time::Instant::now(),
                     );
+                }
+                #[cfg(unix)]
+                if let Some(metadata) = imported_metadata {
+                    terminal.restore_handoff_metadata(metadata);
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);

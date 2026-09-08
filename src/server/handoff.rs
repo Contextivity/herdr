@@ -44,6 +44,93 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    #[serde(default)]
+    pub workspace_metadata:
+        std::collections::HashMap<String, crate::handoff_runtime::HandoffMetadata>,
+    #[serde(default)]
+    pub startup_tickets: Vec<crate::app::HandoffStartupTicket>,
+}
+
+#[cfg(unix)]
+impl HandoffManifest {
+    fn validate(&self) -> io::Result<()> {
+        let mut workspace_ids = std::collections::HashSet::new();
+        let mut pane_ids = std::collections::HashSet::new();
+        for workspace in &self.snapshot.workspaces {
+            let Some(workspace_id) = workspace.id.as_ref().filter(|id| !id.is_empty()) else {
+                return Err(io::Error::other("handoff workspace is missing an identity"));
+            };
+            if !workspace_ids.insert(workspace_id.clone()) {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff workspace identity",
+                ));
+            }
+            let mut ids = Vec::new();
+            for tab in &workspace.tabs {
+                collect_layout_pane_ids(&tab.layout, &mut ids);
+            }
+            for id in ids {
+                if !pane_ids.insert(id) {
+                    return Err(io::Error::other(
+                        "invalid or duplicate handoff pane identity",
+                    ));
+                }
+            }
+        }
+        if self
+            .workspace_metadata
+            .keys()
+            .any(|id| !workspace_ids.contains(id))
+        {
+            return Err(io::Error::other(
+                "handoff metadata references an unknown workspace",
+            ));
+        }
+        let mut terminals = std::collections::HashSet::new();
+        for pane in &self.panes {
+            let Some(terminal_id) = &pane.terminal_id else {
+                continue;
+            };
+            if !terminal_id.is_valid() || !terminals.insert(terminal_id.clone()) {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff terminal identity",
+                ));
+            }
+            if !pane_ids.contains(&pane.pane_id) {
+                return Err(io::Error::other(
+                    "handoff runtime references an unknown pane",
+                ));
+            }
+        }
+        let mut tickets = std::collections::HashSet::new();
+        for ticket in &self.startup_tickets {
+            if !ticket.terminal_id.is_valid()
+                || !terminals.contains(&ticket.terminal_id)
+                || ticket.receipt.terminal_id != ticket.terminal_id.to_string()
+                || ticket.receipt.ticket.is_empty()
+                || !tickets.insert(ticket.receipt.ticket.clone())
+                || ticket.script.as_ref().is_some_and(|script| {
+                    script.directory != ticket.receipt.ticket || script.source_command.is_empty()
+                })
+            {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff startup ticket",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn collect_layout_pane_ids(layout: &crate::persist::LayoutSnapshot, ids: &mut Vec<u32>) {
+    match layout {
+        crate::persist::LayoutSnapshot::Pane(id) => ids.push(*id),
+        crate::persist::LayoutSnapshot::Split { first, second, .. } => {
+            collect_layout_pane_ids(first, ids);
+            collect_layout_pane_ids(second, ids);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -147,6 +234,7 @@ pub(crate) fn accept_and_validate_on(
     token: &str,
     manifest: &HandoffManifest,
 ) -> io::Result<UnixStream> {
+    manifest.validate()?;
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
@@ -238,6 +326,7 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     let manifest_line = read_line_unbuffered(&mut stream)?;
     let manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
+    manifest.validate()?;
     if manifest.version != HANDOFF_VERSION {
         return Err(io::Error::other(format!(
             "unsupported handoff version {}",
@@ -320,6 +409,8 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        workspace_metadata: std::collections::HashMap::new(),
+        startup_tickets: Vec::new(),
     }
 }
 

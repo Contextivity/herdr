@@ -26,11 +26,6 @@ impl HeadlessServer {
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<()> {
-        if self.app.has_handoff_startup_hold() {
-            return Err(io::Error::other(
-                "unreconciled startup tickets require the current daemon; finish owned runs and guarded cleanup before handoff",
-            ));
-        }
         info!("starting live handoff");
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
@@ -98,6 +93,10 @@ impl HeadlessServer {
                 continue;
             };
             let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+            handoff_runtime.terminal_id = Some(terminal_id.clone());
+            if let Some(terminal) = self.app.state.terminals.get(terminal_id) {
+                handoff_runtime.metadata = terminal.capture_handoff_metadata();
+            }
             let has_agent_session = self
                 .app
                 .state
@@ -114,13 +113,20 @@ impl HeadlessServer {
             .iter()
             .map(|(_, runtime)| runtime.clone())
             .collect();
-        let manifest = crate::server::handoff::manifest_for(
+        let mut manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
             params.expected_protocol,
             params.expected_version,
             self.api_window_title.clone(),
         );
+        for workspace in &self.app.state.workspaces {
+            manifest.workspace_metadata.insert(
+                workspace.id.clone(),
+                crate::handoff_runtime::HandoffMetadata::capture_workspace(workspace),
+            );
+        }
+        manifest.startup_tickets = self.app.capture_handoff_startup_tickets();
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
@@ -219,6 +225,10 @@ impl HeadlessServer {
             }
             return Err(err);
         }
+
+        // The replacement has validated and restored the receipt authority. The
+        // old daemon must relinquish file cleanup ownership only after commit.
+        self.app.relinquish_handoff_startup_tickets();
 
         for (terminal_id, runtime) in self.app.terminal_runtimes.drain_for_handoff() {
             if !pane_by_terminal.contains_key(&terminal_id) {

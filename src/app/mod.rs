@@ -9,6 +9,7 @@ pub(crate) mod agent_view;
 mod agents;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
+pub(crate) use api::startup::HandoffStartupTicket;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;
 mod api_helpers;
@@ -639,6 +640,7 @@ impl App {
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
         >,
+        startup_tickets: Vec<HandoffStartupTicket>,
     ) -> io::Result<Self> {
         let mut app = Self::new(
             config,
@@ -663,6 +665,7 @@ impl App {
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_handoff_startup_tickets(startup_tickets);
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());
@@ -691,6 +694,7 @@ impl App {
     #[cfg(unix)]
     pub fn assume_handoff_ownership(&mut self) {
         self.terminal_runtimes.assume_handoff_ownership();
+        self.assume_handoff_startup_ownership();
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
