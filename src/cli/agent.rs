@@ -26,6 +26,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "startup" => agent_startup(&args[1..]),
         "explain" => agent_explain(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
@@ -284,6 +285,62 @@ fn matched_rule_region_preview<'a>(
         .find(|rule| rule["id"].as_str() == Some(rule_id))?["evidence"]["region_preview"]
         .as_str()
         .filter(|preview| !preview.is_empty())
+}
+
+fn agent_startup(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!(
+            "usage: herdr agent startup < request.json (prepare, launch, inspect or cleanup)"
+        );
+        return Ok(2);
+    }
+    let params: crate::api::schema::AgentStartupParams =
+        match serde_json::from_reader(std::io::stdin().lock()) {
+            Ok(params) => params,
+            Err(err) => {
+                eprintln!("invalid startup request: {err}");
+                return Ok(2);
+            }
+        };
+    let launch = match &params {
+        crate::api::schema::AgentStartupParams::Launch { receipt } => Some(receipt.clone()),
+        _ => None,
+    };
+    let mut response = match super::send_request(&Request {
+        id: "cli:agent:startup".into(),
+        method: Method::AgentStartup(params),
+    }) {
+        Ok(response) => response,
+        Err(err) => {
+            return print_agent_transport_error(
+                err,
+                "cli:agent:startup",
+                "agent_start_transport_failed",
+            )
+        }
+    };
+    if response.get("error").is_none() {
+        if let Some(receipt) = launch {
+            match wait_for_named_agent(
+                &receipt.name,
+                &receipt.pane_id,
+                Duration::from_millis(receipt.timeout_ms),
+                &receipt.kind,
+                &receipt.terminal_id,
+            ) {
+                Ok(Ok(agent)) => response["result"]["agent"] = agent,
+                Ok(Err(error)) => return super::print_response(&error),
+                Err(err) => {
+                    return print_agent_transport_error(
+                        err,
+                        "cli:agent:startup",
+                        "agent_start_transport_failed",
+                    )
+                }
+            }
+        }
+    }
+    super::print_response(&response)
 }
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
@@ -937,6 +994,7 @@ fn print_agent_help() {
     eprintln!(
         "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]"
     );
+    eprintln!("  herdr agent startup < request.json");
     eprintln!("  herdr agent explain <target> [--json|--format text|json] [--verbose]");
     eprintln!(
         "  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]"

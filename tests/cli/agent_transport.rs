@@ -281,3 +281,122 @@ fn prompt_wait_is_sent_as_one_agent_request() {
     server.join().unwrap();
     cleanup_test_base(&base);
 }
+// Exercise the real stdin CLI with one accepted launch, without invoking an agent.
+fn startup_cli_fixture(scenario: &'static str) -> std::process::Output {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("startup.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let receipt = serde_json::json!({
+        "ticket": "ticket", "pane_id": "w1:p1", "workspace_id": "w1",
+        "terminal_id": "term_1", "cwd": "/tmp", "name": "worker",
+        "shell_pid": 42, "shell_lifetime": "birth", "kind": "pi", "timeout_ms": 3100
+    });
+    let expected_receipt = receipt.clone();
+    let server = thread::spawn(move || {
+        let (mut stream, line) = accept_fake_cli_operation(&listener);
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "agent.startup");
+        assert_eq!(request["params"]["receipt"], expected_receipt);
+        if scenario == "send_error" {
+            writeln!(stream, "invalid json").unwrap();
+            return;
+        }
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({
+                "id": request["id"], "result": {"type": "agent_started",
+                    "agent": {"terminal_id": "term_1", "name": "worker", "agent": null}}
+            })
+        )
+        .unwrap();
+        drop(stream);
+        let start = Instant::now();
+        loop {
+            let (mut stream, line) = accept_fake_cli_operation(&listener);
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            // Any second launch is a failure, including after transport errors.
+            assert_eq!(request["method"], "agent.get");
+            if scenario == "wait_error" {
+                writeln!(stream, "invalid json").unwrap();
+                break;
+            }
+            let expired = request["id"] == "cli:agent:start:timeout";
+            let ready = scenario != "timeout" || start.elapsed() > Duration::from_secs(4);
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "id": request["id"], "result": {"type": "agent_info", "agent": {
+                        "terminal_id": "term_1", "pane_id": "w1:p1", "name": "worker",
+                        "agent": if scenario == "timeout" { None } else { Some("pi") },
+                        "agent_status": if ready { "idle" } else { "unknown" },
+                        "interactive_ready": ready, "launch_pending": !ready
+                    }}
+                })
+            )
+            .unwrap();
+            if ready || expired {
+                break;
+            }
+        }
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_herdr"))
+        .args(["agent", "startup"])
+        .env("HERDR_SOCKET_PATH", &socket_path)
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.take().unwrap(),
+        "{}",
+        serde_json::json!({
+            "operation": "launch", "receipt": receipt
+        })
+    )
+    .unwrap();
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+    cleanup_test_base(&base);
+    output
+}
+
+#[test]
+fn startup_cli_preserves_prepared_non_codex_kind_without_detection() {
+    let output = startup_cli_fixture("ready");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["agent"]["agent"], "pi");
+}
+
+#[test]
+fn startup_cli_preserves_prepared_non_default_timeout_without_detection() {
+    let output = startup_cli_fixture("timeout");
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(response["error"]["code"], "timeout");
+}
+
+#[test]
+fn startup_cli_structures_readiness_transport_error_without_resend() {
+    let output = startup_cli_fixture("wait_error");
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(response["error"]["code"], "agent_start_transport_failed");
+}
+
+#[test]
+fn startup_cli_structures_initial_transport_error_without_resend() {
+    let output = startup_cli_fixture("send_error");
+    assert_eq!(output.status.code(), Some(1));
+    let response: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(response["error"]["code"], "agent_start_transport_failed");
+}

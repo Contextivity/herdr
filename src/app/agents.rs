@@ -12,11 +12,22 @@ const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
 const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
 
-fn valid_agent_name(name: &str) -> bool {
+pub(crate) fn valid_agent_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('a'..='z'))
         && name.len() <= 32
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+}
+
+pub(crate) fn validated_start_timeout(
+    timeout_ms: Option<u64>,
+) -> Result<Duration, AgentStartError> {
+    let timeout =
+        Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_AGENT_START_TIMEOUT.as_millis() as u64));
+    if timeout <= AGENT_START_SETTLE_DELAY || timeout > MAX_AGENT_START_TIMEOUT {
+        return Err(AgentStartError::InvalidTimeout);
+    }
+    Ok(timeout)
 }
 
 impl App {
@@ -146,6 +157,16 @@ impl App {
         &mut self,
         params: AgentStartParams,
     ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
+        self.start_agent_with_source(params, None, &mut false)
+    }
+
+    pub(super) fn start_agent_with_source(
+        &mut self,
+        params: AgentStartParams,
+        source: Option<&str>,
+        submitted: &mut bool,
+    ) -> Result<(crate::api::schema::AgentInfo, Vec<String>), AgentStartError> {
+        *submitted = false;
         let name = params.name;
         if !valid_agent_name(&name) {
             return Err(AgentStartError::InvalidName);
@@ -198,15 +219,9 @@ impl App {
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
-        let bytes = crate::app::api_helpers::encode_api_submission(runtime, &command);
-        let timeout = Duration::from_millis(
-            params
-                .timeout_ms
-                .unwrap_or(DEFAULT_AGENT_START_TIMEOUT.as_millis() as u64),
-        );
-        if timeout <= AGENT_START_SETTLE_DELAY || timeout > MAX_AGENT_START_TIMEOUT {
-            return Err(AgentStartError::InvalidTimeout);
-        }
+        let input = source.unwrap_or(&command);
+        let bytes = crate::app::api_helpers::encode_api_submission(runtime, input);
+        let timeout = validated_start_timeout(params.timeout_ms)?;
 
         let now = Instant::now();
         let terminal = self
@@ -219,6 +234,7 @@ impl App {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
         }
+        *submitted = true;
         if let Some(session) = persisted_agent_session {
             terminal.set_managed_agent_launch_session(session);
         }
@@ -415,7 +431,7 @@ impl App {
     }
 }
 
-fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
+pub(crate) fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
         return Some("sh".into());

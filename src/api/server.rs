@@ -427,6 +427,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentViewSet(_) => "agent.view.set",
         Method::AgentViewClear(_) => "agent.view.clear",
         Method::AgentFocus(_) => "agent.focus",
+        Method::AgentStartup(_) => "agent.startup",
         Method::AgentStart(_) => "agent.start",
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentWait(_) => "agent.wait",

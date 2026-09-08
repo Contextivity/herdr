@@ -61,6 +61,14 @@ pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Co
     process
 }
 
+mod startup;
+pub(crate) use startup::StartupScript;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn startup_process_lifetime(_pid: u32) -> Option<String> {
+    None
+}
+
 pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {
     pane_custom_command_pty_builder_platform(command)
 }
