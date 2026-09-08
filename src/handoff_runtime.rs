@@ -65,10 +65,12 @@ pub(crate) struct HandoffMetadata {
 #[cfg(unix)]
 impl HandoffMetadata {
     pub(crate) fn capture_workspace(workspace: &crate::workspace::Workspace) -> Self {
+        // Sample the shared clock first so capture cannot extend a deadline.
+        let monotonic = crate::platform::handoff_monotonic_time();
         Self {
             tokens: workspace
                 .metadata_tokens
-                .capture_handoff(std::time::Instant::now(), std::time::SystemTime::now()),
+                .capture_handoff(std::time::Instant::now(), monotonic),
             sequences: workspace.metadata_token_sequences.clone(),
             ..Default::default()
         }
@@ -78,7 +80,7 @@ impl HandoffMetadata {
         workspace.metadata_tokens = crate::metadata_tokens::MetadataTokens::restore_handoff(
             self.tokens,
             std::time::Instant::now(),
-            std::time::SystemTime::now(),
+            crate::platform::handoff_monotonic_time(),
         );
         workspace.metadata_token_sequences = self.sequences;
     }

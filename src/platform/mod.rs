@@ -93,6 +93,30 @@ pub fn current_process_is_detached_server_daemon() -> bool {
     unsafe { libc::getsid(0) == libc::getpid() }
 }
 
+/// Same-boot, cross-process clock matching the local `Instant` timebase.
+/// Handoff is Unix-socket local and cannot import deadlines from another boot.
+#[cfg(unix)]
+pub(crate) fn handoff_monotonic_time() -> Option<std::time::Duration> {
+    #[cfg(target_os = "macos")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_os = "macos"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: value is a valid writable timespec; no pointer is retained.
+    if unsafe { libc::clock_gettime(clock, &mut value) } != 0
+        || !(0..1_000_000_000).contains(&value.tv_nsec)
+    {
+        return None;
+    }
+    Some(std::time::Duration::new(
+        value.tv_sec.try_into().ok()?,
+        value.tv_nsec.try_into().ok()?,
+    ))
+}
+
 /// Raised by the SIGWINCH handler, consumed by the host resize watcher.
 #[cfg(unix)]
 static TERMINAL_RESIZE_SIGNALLED: std::sync::atomic::AtomicBool =

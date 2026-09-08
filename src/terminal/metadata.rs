@@ -56,10 +56,12 @@ impl EffectivePresentation {
 impl TerminalState {
     #[cfg(unix)]
     pub(crate) fn capture_handoff_metadata(&self) -> crate::handoff_runtime::HandoffMetadata {
+        // Sample the shared clock first so capture cannot extend a deadline.
+        let monotonic = crate::platform::handoff_monotonic_time();
         crate::handoff_runtime::HandoffMetadata {
             tokens: self
                 .metadata_tokens
-                .capture_handoff(Instant::now(), std::time::SystemTime::now()),
+                .capture_handoff(Instant::now(), monotonic),
             sequences: self.metadata_report_sequences.clone(),
             sequence_agents: self
                 .metadata_report_agents
@@ -83,7 +85,7 @@ impl TerminalState {
         self.metadata_tokens = crate::metadata_tokens::MetadataTokens::restore_handoff(
             metadata.tokens,
             Instant::now(),
-            std::time::SystemTime::now(),
+            crate::platform::handoff_monotonic_time(),
         );
         self.metadata_report_sequences = metadata.sequences;
         self.metadata_report_agents = metadata
