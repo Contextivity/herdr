@@ -1392,14 +1392,7 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     )
     .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:/bin:/usr/bin", bin.display());
-
-    let spawned = spawn_server_with_env(
-        &config_home,
-        &runtime_dir,
-        &api_socket,
-        &[("PATH", path.as_str())],
-    );
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
     let workspace = request(
@@ -1415,6 +1408,24 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
         .as_str()
         .unwrap()
         .to_string();
+
+    // agent.start resolves `pi` in the pane's login shell, which may replace
+    // the daemon's PATH. Pin the fixture there before any agent launch; never
+    // fall through to a real installed CLI, credentials, or network provider.
+    let ready_marker = base.join("fixture-ready");
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pin-inert-agent",
+            "method": "pane.send_input",
+            "params": {
+                "pane_id": pane_id,
+                "text": format!("pi() {{ '{}' \"$@\"; }}; echo ready > '{}'", fake_pi.display(), ready_marker.display()),
+                "keys": ["Enter"]
+            }
+        }),
+    ));
+    support::wait_for_file(&ready_marker, Duration::from_secs(5));
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let started = loop {
