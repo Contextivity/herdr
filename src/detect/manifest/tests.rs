@@ -301,6 +301,29 @@ fn all_bundled_manifests_parse_and_validate() {
 }
 
 #[test]
+fn pi_activity_border_is_current_activity_not_transcript_text() {
+    with_manifest_dirs("pi-activity-border", || {
+        let border = "── ⠇ Working ─────────────────────";
+        let footer =
+            "──────────────────────────────\n~/fixture\n0.9%/1.0M (auto) glm-5.3-flash-exl3 • low";
+        let live = explain(Agent::Pi, &format!("{border}\n\n{footer}"));
+        assert_eq!(live.state, AgentState::Working);
+        assert!(live.visible_working);
+        let idle = explain(
+            Agent::Pi,
+            &format!("──────────────────────────────\n\n{footer}"),
+        );
+        assert_eq!(idle.state, AgentState::Idle);
+        let quoted = explain(
+            Agent::Pi,
+            &format!("{border}\none\ntwo\nthree\nfour\nfive\n{footer}"),
+        );
+        assert_eq!(quoted.state, AgentState::Idle);
+        assert_eq!(explain(Agent::Pi, "Working...").state, AgentState::Working);
+    });
+}
+
+#[test]
 fn devin_manifest_detects_idle_working_and_blocked_states() {
     let idle = explain(
         Agent::Devin,
