@@ -112,6 +112,7 @@ impl StartupScript {
             .is_some_and(|value| value.trim().parse::<u8>().is_ok())
     }
 
+    #[cfg(unix)]
     pub(crate) fn from_handoff(directory: PathBuf, source_command: String) -> Self {
         Self {
             directory,
@@ -120,10 +121,12 @@ impl StartupScript {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn assume_handoff_ownership(&mut self) {
         self.owns_files = true;
     }
 
+    #[cfg(unix)]
     pub(crate) fn relinquish_handoff_ownership(&mut self) {
         self.owns_files = false;
     }

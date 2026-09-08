@@ -23,10 +23,13 @@ impl TerminalId {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_micros())
             .unwrap_or(0);
-        loop {
+        let next_id = || {
             let counter = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
-            let id = Self(format!("term_{micros:x}{counter:x}"));
-            #[cfg(unix)]
+            Self(format!("term_{micros:x}{counter:x}"))
+        };
+        #[cfg(unix)]
+        loop {
+            let id = next_id();
             if IMPORTED_TERMINAL_IDS
                 .get()
                 .is_some_and(|ids| ids.lock().unwrap_or_else(|p| p.into_inner()).contains(&id))
@@ -35,6 +38,8 @@ impl TerminalId {
             }
             return id;
         }
+        #[cfg(not(unix))]
+        next_id()
     }
 
     #[cfg(unix)]
