@@ -1623,6 +1623,103 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
 }
 
 #[test]
+fn live_handoff_retains_startup_authority_until_guarded_cleanup() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let workspace = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:workspace", "method":"workspace.create",
+            "params":{"cwd":"/tmp", "focus":false}}),
+    );
+    assert_ok(workspace.clone());
+    let pane_id = &workspace["result"]["root_pane"]["pane_id"];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let prepared = loop {
+        let response = request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:prepare", "method":"agent.startup",
+                "params":{"operation":"prepare", "start":{"name":"handoff-ticket",
+                    "kind":"codex", "pane_id":pane_id, "args":[], "timeout_ms":60000},
+                    "preparation":[]}}),
+        );
+        if response.get("result").is_some() {
+            break response;
+        }
+        // A login shell can still be initializing. This refusal creates no
+        // ticket; never retry an ambiguous response or an actual launch.
+        assert_eq!(response["error"]["code"], "agent_pane_busy", "{response}");
+        assert!(
+            Instant::now() < deadline,
+            "shell did not settle: {response}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let receipt = &prepared["result"]["receipt"];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:inspect", "method":"agent.startup",
+                "params":{"operation":"inspect", "receipt":receipt}}),
+        );
+        if observed["result"]["state"] == "prepared" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ticket did not settle: {observed}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    let refused = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:handoff", "method":"server.live_handoff", "params":{}}),
+    );
+    assert_eq!(refused["error"]["code"], "handoff_failed");
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unreconciled startup tickets"));
+    assert_eq!(
+        request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:still-owned",
+            "method":"agent.startup", "params":{"operation":"inspect", "receipt":receipt}})
+        )["result"]["state"],
+        "prepared"
+    );
+    // Prepare never invoked Codex. Retire exactly this shell through its ticket,
+    // then prove the completed tombstone no longer blocks ordinary handoff.
+    assert_eq!(
+        request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:cleanup",
+            "method":"agent.startup", "params":{"operation":"cleanup", "receipt":receipt}})
+        )["result"]["state"],
+        "cleaned"
+    );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:retry",
+        "method":"server.live_handoff", "params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:stop",
+        "method":"server.stop", "params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_shell_pane_after_foreground_process_exits() {
     let _lock = test_lock();
     let base = unique_test_dir();
