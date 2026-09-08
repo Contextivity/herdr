@@ -102,6 +102,12 @@ pub fn restore_handoff(
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
 ) -> std::io::Result<RestoredSession> {
+    // Reserve every imported ID before legacy/missing-runtime fallback can allocate.
+    TerminalId::reserve_imported(
+        imports
+            .values()
+            .filter_map(|runtime| runtime.state.terminal_id.clone()),
+    );
     restore_with_imports_strict(
         snapshot,
         None,
@@ -527,6 +533,13 @@ fn restore_tab(
             })
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
+        #[cfg(unix)]
+        let imported_identity = imported_runtime.as_ref().map(|import| {
+            (
+                import.state.terminal_id.clone(),
+                import.state.metadata.clone(),
+            )
+        });
         let was_imported = imported_runtime.is_some();
         let pending_native_agent_restore = if was_imported {
             None
@@ -627,8 +640,18 @@ fn restore_tab(
 
         match runtime_result {
             Ok(runtime) => {
+                #[cfg(unix)]
+                let terminal_id = imported_identity
+                    .as_ref()
+                    .and_then(|(id, _)| id.clone())
+                    .unwrap_or_else(TerminalId::alloc);
+                #[cfg(not(unix))]
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                #[cfg(unix)]
+                if let Some((_, metadata)) = imported_identity {
+                    terminal.restore_handoff_metadata(metadata);
+                }
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -933,6 +956,134 @@ mod tests {
     #[cfg(not(windows))]
     fn test_restore_shell() -> &'static str {
         "/bin/sh"
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_preserves_only_imported_terminal_identity_and_metadata() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let mut source = crate::app::state::AppState::test_new();
+        source.workspaces.push(Workspace::test_new("handoff"));
+        source.workspaces[0].metadata_tokens.patch(
+            HashMap::from([("workspace_group".into(), Some("factory".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+        source.workspaces[0]
+            .metadata_token_sequences
+            .insert("factory".into(), 12);
+        source.active = Some(0);
+        source.ensure_test_terminals();
+        source.assert_invariants_for_test();
+        let pane_id = source.workspaces[0].tabs[0].root_pane;
+        let terminal_id = source.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = source.terminals.get_mut(&terminal_id).unwrap();
+        terminal.metadata_tokens.patch(
+            HashMap::from([("orchestration_id".into(), Some("factory".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+        assert_eq!(
+            terminal.accept_metadata_report("factory", Some(12), true, None),
+            Ok(true)
+        );
+        let metadata = terminal.capture_handoff_metadata();
+        let snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.terminals,
+            &Default::default(),
+            source.active,
+            0,
+            30,
+            0.5,
+            Default::default(),
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("orchestration_id"));
+        assert!(!json.contains(terminal_id.as_str()));
+        let snapshot = serde_json::from_str(&json).unwrap();
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let _slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let mut runtime: crate::handoff_runtime::HandoffRuntimeState =
+            serde_json::from_value(serde_json::json!({
+                "pane_id": pane_id.raw(), "terminal_id": terminal_id,
+                "child_pid": 0, "rows": 24, "cols": 80, "cell_width_px": 0, "cell_height_px": 0
+            }))
+            .unwrap();
+        runtime.metadata = metadata;
+        let mut imports = HashMap::from([(
+            pane_id.raw(),
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: master,
+                state: runtime,
+            },
+        )]);
+        let (events, _rx) = mpsc::channel(64);
+        let (workspaces, terminals, runtimes) = restore_handoff(
+            &snapshot,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            events.clone(),
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        )
+        .unwrap();
+        assert!(imports.is_empty());
+        assert!(runtimes.contains_key(&terminal_id));
+        let mut target = crate::app::state::AppState::test_new();
+        target.workspaces = workspaces;
+        target.terminals = terminals;
+        target.active = Some(0);
+        target.assert_invariants_for_test();
+        let restored = target.terminals.get_mut(&terminal_id).unwrap();
+        assert_eq!(
+            restored
+                .metadata_tokens
+                .values()
+                .get("orchestration_id")
+                .map(String::as_str),
+            Some("factory")
+        );
+        assert_eq!(
+            restored.accept_metadata_report("factory", Some(12), true, None),
+            Ok(false)
+        );
+        let (cold_workspaces, cold_terminals, _cold_runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        assert!(!cold_terminals.contains_key(&terminal_id));
+        assert!(cold_terminals
+            .values()
+            .all(|terminal| terminal.metadata_tokens.values().is_empty()));
+        assert!(cold_workspaces
+            .iter()
+            .all(|ws| ws.metadata_tokens.values().is_empty()
+                && ws.metadata_token_sequences.is_empty()));
     }
 
     #[test]

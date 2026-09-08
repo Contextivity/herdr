@@ -18,6 +18,19 @@ pub(in crate::app) struct StartupTicket {
 }
 
 impl App {
+    /// Startup tickets are issuing-daemon authority, not reconstructed from a
+    /// wrapper's receipt. Until their transfer is supported, keep that daemon
+    /// alive while any unexpired ticket still needs reconciliation or cleanup.
+    #[cfg(unix)]
+    pub(crate) fn has_handoff_startup_hold(&self) -> bool {
+        self.startup_tickets.values().any(|ticket| {
+            !ticket.cleanup_completed
+                && ticket
+                    .closed_at
+                    .is_none_or(|closed| closed.elapsed() < std::time::Duration::from_secs(86_400))
+        })
+    }
+
     pub(in crate::app) fn retire_startup_files(&mut self, terminal_id: &TerminalId) {
         for ticket in self
             .startup_tickets
@@ -560,6 +573,36 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
+        // Handoff must retain issuing authority for every unfinished lifecycle,
+        // including a submitted launch and a closed pane awaiting reconciliation.
+        assert!(app.has_handoff_startup_hold());
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .submitted = true;
+        assert!(app.has_handoff_startup_hold());
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .closed_at = Some(std::time::Instant::now());
+        assert!(app.has_handoff_startup_hold());
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .cleanup_completed = true;
+        assert!(!app.has_handoff_startup_hold());
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .cleanup_completed = false;
+        app.startup_tickets
+            .get_mut(&receipt.ticket)
+            .unwrap()
+            .closed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(86_401));
+        assert!(!app.has_handoff_startup_hold());
+        let ticket = app.startup_tickets.get_mut(&receipt.ticket).unwrap();
+        ticket.closed_at = None;
+        ticket.submitted = false;
         // Inspect is observation only: a prepared ticket must never submit input.
         let inspect: AgentStartupParams = serde_json::from_value(serde_json::json!({
             "operation": "inspect", "receipt": receipt

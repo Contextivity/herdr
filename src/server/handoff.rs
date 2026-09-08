@@ -44,6 +44,65 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    #[serde(default)]
+    pub workspace_metadata:
+        std::collections::HashMap<String, crate::handoff_runtime::HandoffMetadata>,
+}
+
+#[cfg(unix)]
+impl HandoffManifest {
+    /// Reject ambiguous routing before receiving or importing any file descriptors.
+    fn validate_identities(&self) -> io::Result<()> {
+        use std::collections::HashSet;
+        fn visit(layout: &crate::persist::LayoutSnapshot, ids: &mut HashSet<u32>) -> bool {
+            match layout {
+                crate::persist::LayoutSnapshot::Pane(id) => ids.insert(*id),
+                crate::persist::LayoutSnapshot::Split { first, second, .. } => {
+                    visit(first, ids) && visit(second, ids)
+                }
+            }
+        }
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or duplicate handoff identity",
+            )
+        };
+        let mut workspace_ids = HashSet::new();
+        let mut snapshot_panes = HashSet::new();
+        for workspace in &self.snapshot.workspaces {
+            if let Some(id) = &workspace.id {
+                if id.is_empty() || !workspace_ids.insert(id.as_str()) {
+                    return Err(invalid());
+                }
+            }
+            for tab in &workspace.tabs {
+                if !visit(&tab.layout, &mut snapshot_panes) {
+                    return Err(invalid());
+                }
+            }
+        }
+        if self
+            .workspace_metadata
+            .keys()
+            .any(|id| !workspace_ids.contains(id.as_str()))
+        {
+            return Err(invalid());
+        }
+        let mut pane_ids = HashSet::new();
+        let mut terminal_ids = HashSet::new();
+        for pane in &self.panes {
+            if !snapshot_panes.contains(&pane.pane_id) || !pane_ids.insert(pane.pane_id) {
+                return Err(invalid());
+            }
+            if let Some(id) = &pane.terminal_id {
+                if !id.is_valid() || !terminal_ids.insert(id) {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -265,6 +324,7 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
+    manifest.validate_identities()?;
     stream.write_all(b"validated\n")?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
@@ -320,6 +380,7 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        workspace_metadata: Default::default(),
     }
 }
 
@@ -485,6 +546,89 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+        }
+    }
+
+    fn populated_manifest() -> HandoffManifest {
+        let state = crate::app::state::AppState::test_with_adversarial_identity_state();
+        state.assert_invariants_for_test();
+        let snapshot = crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &Default::default(),
+            state.active,
+            state.selected,
+            30,
+            0.5,
+            Default::default(),
+        );
+        let panes = state
+            .workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .flat_map(|tab| &tab.panes)
+            .map(|(pane_id, pane)| {
+                serde_json::from_value(serde_json::json!({
+                    "pane_id": pane_id.raw(), "terminal_id": pane.attached_terminal_id,
+                    "child_pid": 0, "rows": 24, "cols": 80,
+                    "cell_width_px": 0, "cell_height_px": 0
+                }))
+                .unwrap()
+            })
+            .collect();
+        manifest_for(snapshot, panes, None, None, None)
+    }
+
+    #[test]
+    fn handoff_legacy_identity_and_metadata_fields_default_safely() {
+        let manifest = populated_manifest();
+        let mut json = serde_json::to_value(manifest).unwrap();
+        json.as_object_mut().unwrap().remove("workspace_metadata");
+        for pane in json["panes"].as_array_mut().unwrap() {
+            pane.as_object_mut().unwrap().remove("terminal_id");
+            pane.as_object_mut().unwrap().remove("metadata");
+        }
+        let old: HandoffManifest = serde_json::from_value(json).unwrap();
+        old.validate_identities().unwrap();
+        assert!(old.workspace_metadata.is_empty());
+        assert!(old
+            .panes
+            .iter()
+            .all(|pane| pane.terminal_id.is_none() && pane.metadata.tokens.is_empty()));
+    }
+
+    #[test]
+    fn handoff_rejects_duplicate_and_invalid_identities_before_import() {
+        let manifest = populated_manifest();
+        manifest.validate_identities().unwrap();
+        let original = serde_json::to_value(manifest).unwrap();
+        for mutation in 0..6 {
+            let mut manifest: HandoffManifest = serde_json::from_value(original.clone()).unwrap();
+            match mutation {
+                0 => manifest.panes.push(manifest.panes[0].clone()),
+                1 => manifest.panes[1].terminal_id = manifest.panes[0].terminal_id.clone(),
+                2 => {
+                    manifest.panes[0].terminal_id =
+                        Some(serde_json::from_value(serde_json::json!("bad-id")).unwrap())
+                }
+                3 => manifest.panes[0].pane_id = u32::MAX,
+                4 => {
+                    manifest
+                        .workspace_metadata
+                        .insert("unknown".into(), Default::default());
+                }
+                _ => manifest.snapshot.workspaces.push(
+                    serde_json::from_value(
+                        serde_json::to_value(&manifest.snapshot.workspaces[0]).unwrap(),
+                    )
+                    .unwrap(),
+                ),
+            }
+            assert_eq!(
+                manifest.validate_identities().unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "mutation {mutation}"
+            );
         }
     }
 

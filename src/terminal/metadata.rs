@@ -54,6 +54,48 @@ impl EffectivePresentation {
 }
 
 impl TerminalState {
+    #[cfg(unix)]
+    pub(crate) fn capture_handoff_metadata(&self) -> crate::handoff_runtime::HandoffMetadata {
+        crate::handoff_runtime::HandoffMetadata {
+            tokens: self
+                .metadata_tokens
+                .capture_handoff(Instant::now(), std::time::SystemTime::now()),
+            sequences: self.metadata_report_sequences.clone(),
+            sequence_agents: self
+                .metadata_report_agents
+                .iter()
+                .map(|(source, agent)| {
+                    (
+                        source.clone(),
+                        crate::detect::agent_label(*agent).to_string(),
+                    )
+                })
+                .collect(),
+            token_sequence_sources: self.metadata_token_sequence_sources.clone(),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff_metadata(
+        &mut self,
+        metadata: crate::handoff_runtime::HandoffMetadata,
+    ) {
+        self.metadata_tokens = crate::metadata_tokens::MetadataTokens::restore_handoff(
+            metadata.tokens,
+            Instant::now(),
+            std::time::SystemTime::now(),
+        );
+        self.metadata_report_sequences = metadata.sequences;
+        self.metadata_report_agents = metadata
+            .sequence_agents
+            .into_iter()
+            .filter_map(|(source, label)| {
+                crate::detect::parse_canonical_agent_label(&label).map(|agent| (source, agent))
+            })
+            .collect();
+        self.metadata_token_sequence_sources = metadata.token_sequence_sources;
+    }
+
     pub(crate) fn metadata_report_sequence_is_fresh(&self, source: &str, seq: Option<u64>) -> bool {
         crate::metadata_tokens::sequence_is_fresh(&self.metadata_report_sequences, source, seq)
     }
@@ -527,6 +569,54 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_metadata_preserves_deduplication_ownership_and_source_limit() {
+        let mut terminal = test_terminal();
+        for index in 0..crate::metadata_tokens::MAX_SEQUENCE_SOURCES {
+            assert_eq!(
+                terminal.accept_metadata_report(
+                    &format!("source-{index}"),
+                    Some(42),
+                    true,
+                    Some(Agent::Claude)
+                ),
+                Ok(true)
+            );
+        }
+        terminal.metadata_tokens.patch(
+            HashMap::from([("orchestration_id".into(), Some("fleet".into()))]),
+            None,
+            Instant::now(),
+        );
+        let transfer = serde_json::from_str(
+            &serde_json::to_string(&terminal.capture_handoff_metadata()).unwrap(),
+        )
+        .unwrap();
+        let mut restored = test_terminal();
+        restored.restore_handoff_metadata(transfer);
+        assert_eq!(
+            restored.metadata_tokens.values(),
+            terminal.metadata_tokens.values()
+        );
+        assert_eq!(
+            restored.metadata_report_agents,
+            terminal.metadata_report_agents
+        );
+        assert_eq!(
+            restored.accept_metadata_report("source-0", Some(42), true, None),
+            Ok(false)
+        );
+        assert_eq!(
+            restored.accept_metadata_report("source-0", Some(43), true, None),
+            Ok(true)
+        );
+        assert_eq!(
+            restored.accept_metadata_report("new-source", Some(1), true, None),
+            Err(())
+        );
     }
 
     #[test]
