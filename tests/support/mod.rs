@@ -754,7 +754,10 @@ fn current_checkout_root() -> &'static Path {
 }
 
 fn is_test_herdr_binary(path: &Path) -> bool {
-    path.ends_with("target/debug/herdr") && path.starts_with(current_checkout_root())
+    // Cargo may put integration binaries outside the checkout via CARGO_TARGET_DIR.
+    // Match its exact executable, never every binary in a shared target directory.
+    option_env!("CARGO_BIN_EXE_herdr").is_some_and(|binary| path == Path::new(binary))
+        || (path.ends_with("target/debug/herdr") && path.starts_with(current_checkout_root()))
 }
 
 extern "C" fn run_atexit_cleanup() {
@@ -891,5 +894,14 @@ mod tests {
             !is_test_herdr_binary(Path::new("/home/can/.local/bin/herdr")),
             "installed binaries must not be considered test-owned"
         );
+    }
+
+    #[test]
+    fn test_binary_matcher_accepts_cargo_binary_and_rejects_siblings() {
+        if let Some(binary) = option_env!("CARGO_BIN_EXE_herdr") {
+            let binary = Path::new(binary);
+            assert!(is_test_herdr_binary(binary));
+            assert!(!is_test_herdr_binary(&binary.with_file_name("unrelated-herdr")));
+        }
     }
 }
