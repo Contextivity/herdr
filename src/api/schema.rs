@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod commands;
 pub mod common;
 pub mod events;
 pub mod integrations;
@@ -14,6 +15,7 @@ pub mod workspaces;
 pub mod worktrees;
 
 pub use agents::*;
+pub use commands::*;
 pub use common::*;
 pub use events::*;
 pub use integrations::*;
@@ -57,10 +59,18 @@ pub enum Method {
     ServerReloadAgentManifests(EmptyParams),
     #[serde(rename = "notification.show")]
     NotificationShow(NotificationShowParams),
+    #[serde(rename = "product_announcement.dismiss")]
+    ProductAnnouncementDismiss(ProductAnnouncementDismissParams),
+    #[serde(rename = "release_notes.dismiss")]
+    ReleaseNotesDismiss(ReleaseNotesDismissParams),
+    #[serde(rename = "command.invoke")]
+    CommandInvoke(CommandInvokeParams),
     #[serde(rename = "client.window_title.set")]
     ClientWindowTitleSet(ClientWindowTitleSetParams),
     #[serde(rename = "client.window_title.clear")]
     ClientWindowTitleClear(EmptyParams),
+    #[serde(rename = "client_shell.surface.set")]
+    ClientShellSurfaceSet(ClientShellSurfaceSetParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
     #[serde(rename = "workspace.create")]
@@ -121,18 +131,6 @@ pub enum Method {
     AgentViewSet(AgentViewSetParams),
     #[serde(rename = "agent.view.clear")]
     AgentViewClear(AgentViewClearParams),
-    #[serde(rename = "agent.provider.replace")]
-    AgentProviderReplace(AgentProviderReplaceParams),
-    #[serde(rename = "agent.provider.clear")]
-    AgentProviderClear(AgentProviderClearParams),
-    #[serde(rename = "agent.provider.get")]
-    AgentProviderGet(AgentProviderTarget),
-    #[serde(rename = "agent.provider.snapshot")]
-    AgentProviderSnapshot(AgentProviderSource),
-    #[serde(rename = "agent.provider.focus")]
-    AgentProviderFocus(AgentProviderTarget),
-    #[serde(rename = "agent.provider.focused")]
-    AgentProviderFocused(EmptyParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.startup")]
@@ -169,6 +167,16 @@ pub enum Method {
     PaneFocusDirection(PaneFocusDirectionParams),
     #[serde(rename = "pane.resize")]
     PaneResize(PaneResizeParams),
+    #[serde(rename = "pane.scroll")]
+    PaneScroll(PaneScrollParams),
+    #[serde(rename = "pane.edit_scrollback")]
+    PaneEditScrollback(PaneTarget),
+    #[serde(rename = "pane.selection.read")]
+    PaneSelectionRead(PaneSelectionReadParams),
+    #[serde(rename = "pane.copy_motion")]
+    PaneCopyMotion(PaneCopyMotionParams),
+    #[serde(rename = "pane.copy_search")]
+    PaneCopySearch(PaneCopySearchParams),
     #[serde(rename = "pane.list")]
     PaneList(PaneListParams),
     #[serde(rename = "pane.current")]
@@ -179,6 +187,8 @@ pub enum Method {
     PaneFocus(PaneTarget),
     #[serde(rename = "pane.input.set")]
     PaneInputSet(PaneInputSetParams),
+    #[serde(rename = "pane.link.activate")]
+    PaneLinkActivate(PaneLinkActivateParams),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
     #[serde(rename = "pane.send_text")]
@@ -230,6 +240,8 @@ pub enum Method {
     EventsWait(EventsWaitParams),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
+    #[serde(rename = "integration.list")]
+    IntegrationList(EmptyParams),
     #[serde(rename = "integration.install")]
     IntegrationInstall(IntegrationInstallParams),
     #[serde(rename = "integration.uninstall")]

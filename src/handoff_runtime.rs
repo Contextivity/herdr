@@ -16,7 +16,6 @@ pub(crate) struct HandoffRuntimeState {
     pub terminal_id: Option<crate::terminal::TerminalId>,
     #[serde(default)]
     pub metadata: HandoffMetadata,
-
     pub child_pid: u32,
     pub rows: u16,
     pub cols: u16,
@@ -50,7 +49,8 @@ pub(crate) struct ImportedHandoffRuntime {
     pub state: HandoffRuntimeState,
 }
 
-/// Token state is runtime-only, never part of ordinary disk snapshots.
+/// Runtime metadata is carried only by live handoff. Ordinary session
+/// snapshots must remain portable across machines and boot sessions.
 #[cfg(unix)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct HandoffMetadata {
@@ -91,7 +91,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_handoff_preserves_tokens_and_sequences_after_expiry() {
+    fn workspace_handoff_preserves_sequences_and_drops_expired_tokens() {
         let mut source = crate::workspace::Workspace::test_new("source");
         source.metadata_token_sequences.insert("writer".into(), 7);
         source.metadata_tokens.patch(
@@ -110,8 +110,15 @@ mod tests {
         .unwrap();
         let mut target = crate::workspace::Workspace::test_new("target");
         transfer.restore_workspace(&mut target);
-        assert!(target.metadata_tokens.contains_key("permanent"));
-        assert!(!target.metadata_tokens.contains_key("expired"));
+        assert_eq!(
+            target
+                .metadata_tokens
+                .values()
+                .get("permanent")
+                .map(String::as_str),
+            Some("group")
+        );
+        assert!(!target.metadata_tokens.values().contains_key("expired"));
         assert_eq!(
             crate::metadata_tokens::accept_sequence(
                 &mut target.metadata_token_sequences,

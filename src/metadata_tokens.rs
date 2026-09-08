@@ -107,10 +107,6 @@ impl MetadataTokens {
         Self { entries }
     }
 
-    pub(crate) fn contains_key(&self, key: &str) -> bool {
-        self.entries.contains_key(key)
-    }
-
     pub(crate) fn patch(
         &mut self,
         patch: HashMap<String, Option<String>>,
@@ -209,8 +205,8 @@ mod tests {
             now,
             Some(monotonic + Duration::from_secs(3)),
         );
-        assert!(!restored.contains_key("short"));
-        assert!(restored.contains_key("permanent"));
+        assert!(!restored.values().contains_key("short"));
+        assert!(restored.values().contains_key("permanent"));
         assert_eq!(restored.next_expiry(), Some(now + Duration::from_secs(7)));
     }
 
@@ -232,7 +228,7 @@ mod tests {
             now + Duration::from_secs(3),
             Some(monotonic + Duration::from_secs(3)),
         );
-        assert!(!restored.contains_key("short"));
+        assert!(!restored.values().contains_key("short"));
     }
 
     #[cfg(unix)]
@@ -253,8 +249,8 @@ mod tests {
         }
         let transfer = tokens.capture_handoff(now, Some(Duration::from_secs(100)));
         let restored = MetadataTokens::restore_handoff(transfer, now, None);
-        assert!(!restored.contains_key("temporary"));
-        assert!(restored.contains_key("permanent"));
+        assert!(!restored.values().contains_key("temporary"));
+        assert!(restored.values().contains_key("permanent"));
     }
 
     #[cfg(unix)]

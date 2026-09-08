@@ -157,9 +157,6 @@ impl ActiveSubscription {
             Subscription::PaneAgentDetected {} => {
                 Ok(event_subscription(EventKind::PaneAgentDetected))
             }
-            Subscription::AgentProviderFocused {} => {
-                Ok(event_subscription(EventKind::AgentProviderFocused))
-            }
             Subscription::LayoutUpdated {} => Ok(event_subscription(EventKind::LayoutUpdated)),
             Subscription::PaneOutputMatched {
                 pane_id,

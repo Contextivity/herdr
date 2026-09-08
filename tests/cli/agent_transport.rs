@@ -281,7 +281,6 @@ fn prompt_wait_is_sent_as_one_agent_request() {
     server.join().unwrap();
     cleanup_test_base(&base);
 }
-
 // Exercise the real stdin CLI with one accepted launch, without invoking an agent.
 fn startup_cli_fixture(scenario: &'static str) -> std::process::Output {
     let base = unique_test_dir();

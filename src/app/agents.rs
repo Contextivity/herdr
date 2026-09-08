@@ -12,14 +12,14 @@ const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
 const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
 
-pub(super) fn valid_agent_name(name: &str) -> bool {
+pub(crate) fn valid_agent_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('a'..='z'))
         && name.len() <= 32
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
-pub(super) fn validated_start_timeout(
+pub(crate) fn validated_start_timeout(
     timeout_ms: Option<u64>,
 ) -> Result<Duration, AgentStartError> {
     let timeout =
@@ -31,6 +31,13 @@ pub(super) fn validated_start_timeout(
 }
 
 impl App {
+    #[cfg(unix)]
+    pub(crate) fn has_pending_ordinary_startup(&self) -> bool {
+        self.startup_scripts
+            .values()
+            .any(crate::platform::StartupScript::pending)
+    }
+
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
             .workspaces
@@ -91,7 +98,7 @@ impl App {
         self.state
             .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
         self.state.mark_active_tab_seen();
-        self.state.settle_terminal_mode_after_focus();
+        self.state.mode = crate::app::Mode::Terminal;
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
@@ -150,8 +157,6 @@ impl App {
                 target: target.to_string(),
             }));
         };
-        // These preconditions and the name mutation share one server request;
-        // there is no intervening await or client-side check-to-use window.
         if let Some(expected) = expected_terminal_id {
             if resolved.terminal_id != expected
                 || terminal
@@ -211,6 +216,8 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        let persisted_agent_session =
+            crate::agent_resume::persisted_session_from_launch_args(kind, &params.args);
         let conflicts = self.agent_name_conflicts(&name, "");
         if !conflicts.is_empty() {
             return Err(AgentStartError::DuplicateName {
@@ -253,9 +260,7 @@ impl App {
         } else {
             None
         };
-        let input = source
-            .or_else(|| script.as_ref().map(|s| s.source_command.as_str()))
-            .unwrap_or(&command);
+        let input = startup_input(source, &command, script.as_ref());
         let bytes = crate::app::api_helpers::encode_api_submission(runtime, input);
         let timeout = validated_start_timeout(params.timeout_ms)?;
 
@@ -270,11 +275,12 @@ impl App {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
         }
-        // try_send_bytes is an all-or-nothing channel enqueue. No await or API
-        // dispatch occurs here; preserve accepted input even if response assembly fails.
-        *submitted = true;
         if let Some(script) = script {
             self.startup_scripts.insert(terminal_id, script);
+        }
+        *submitted = true;
+        if let Some(session) = persisted_agent_session {
+            terminal.set_managed_agent_launch_session(session);
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -383,13 +389,13 @@ impl App {
     ) -> crate::api::schema::ErrorBody {
         match err {
             AgentRenameError::Target(err) => self.agent_target_error_body(err),
+            AgentRenameError::OwnershipChanged => crate::api::schema::ErrorBody {
+                code: "agent_ownership_changed".into(),
+                message: "agent terminal or name ownership changed; retry from a fresh agent record".into(),
+            },
             AgentRenameError::InvalidName => crate::api::schema::ErrorBody {
                 code: "invalid_agent_name".into(),
                 message: INVALID_AGENT_NAME_MESSAGE.into(),
-            },
-            AgentRenameError::OwnershipChanged => crate::api::schema::ErrorBody {
-                code: "agent_ownership_changed".into(),
-                message: "terminal identity or source agent name changed; restoration refused".into(),
             },
             AgentRenameError::NotAgent => crate::api::schema::ErrorBody {
                 code: "agent_not_found".into(),
@@ -473,7 +479,17 @@ impl App {
     }
 }
 
-pub(super) fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
+fn startup_input<'a>(
+    source: Option<&'a str>,
+    command: &'a str,
+    script: Option<&'a crate::platform::StartupScript>,
+) -> &'a str {
+    source
+        .or_else(|| script.map(|script| script.source_command.as_str()))
+        .unwrap_or(command)
+}
+
+pub(crate) fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
         return Some("sh".into());
@@ -532,6 +548,8 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::startup_input;
     use super::valid_agent_name;
 
     #[test]
@@ -551,5 +569,23 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ordinary_start_uses_the_short_script_source_for_large_commands() {
+        let command = format!("agent {}", "x".repeat(8_000));
+        let script = crate::platform::StartupScript::for_interactive("sh", &command)
+            .unwrap()
+            .expect("POSIX shells use private startup scripts");
+
+        assert_eq!(
+            startup_input(None, &command, Some(&script)),
+            script.source_command
+        );
+        assert_eq!(
+            startup_input(Some("native source"), &command, None),
+            "native source"
+        );
     }
 }

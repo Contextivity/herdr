@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           git config user.name contextivity-upstream-bot
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git remote add upstream https://github.com/ogulcancelik/herdr.git
+          git remote add upstream https://github.com/herdrdev/herdr.git
           git fetch upstream master
           git checkout -B automation/upstream-sync origin/master
 
@@ -45,7 +45,7 @@ jobs:
             git merge --abort || true
             title="Upstream sync conflict"
             issue=$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')
-            body="The scheduled upstream sync could not merge ogulcancelik/herdr master into Contextivity/herdr master. Resolve the conflict on automation/upstream-sync, then rerun this workflow."
+            body="The scheduled upstream sync could not merge herdrdev/herdr master into Contextivity/herdr master. Resolve the conflict on automation/upstream-sync, then rerun this workflow."
             if [ -n "$issue" ]; then
               gh issue comment "$issue" --body "$body"
             else
@@ -70,7 +70,7 @@ jobs:
               --base master \
               --head automation/upstream-sync \
               --title "chore: sync upstream herdr" \
-              --body "Merge the latest ogulcancelik/herdr master into the Contextivity fork. The normal CI and orchestration-sidebar gates must pass before merge."
+              --body "Merge the latest herdrdev/herdr master into the Contextivity fork. The normal CI and orchestration-sidebar gates must pass before merge."
           fi
 
           if [ "${{ vars.AUTO_MERGE_UPSTREAM }}" = "true" ]; then

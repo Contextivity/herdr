@@ -50,6 +50,7 @@ fn request_uses_dot_method_names() {
     let request = Request {
         id: "req_1".into(),
         method: Method::WorkspaceCreate(WorkspaceCreateParams {
+            source_workspace_id: None,
             cwd: Some("/tmp".into()),
             focus: true,
             label: Some("api".into()),
@@ -132,6 +133,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             wait: Some(AgentPromptWaitOptions {
                 until: vec![AgentStatus::Idle, AgentStatus::Done],
                 timeout_ms: Some(120_000),
+                submission_deadline: None,
             }),
         }),
     };
@@ -273,6 +275,54 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn integration_list_request_and_response_round_trip() {
+    let request = Request {
+        id: "req_integrations".into(),
+        method: Method::IntegrationList(EmptyParams::default()),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "integration.list");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let response = SuccessResponse {
+        id: "req_integrations".into(),
+        result: ResponseResult::IntegrationList {
+            integrations: vec![IntegrationInfo {
+                target: IntegrationTarget::Codex,
+                label: "codex".into(),
+                command: "codex".into(),
+                available: true,
+                state: IntegrationState::Outdated,
+            }],
+        },
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "integration_list");
+    assert_eq!(json["result"]["integrations"][0]["state"], "outdated");
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(json).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn command_invoke_request_round_trips_without_command_text() {
+    let request = Request {
+        id: "req_command".into(),
+        method: Method::CommandInvoke(CommandInvokeParams {
+            command_id: "cmd_0123456789abcdef0123456789abcdef".into(),
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+            pane_id: Some("w1:p1".into()),
+            selection: None,
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "command.invoke");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+}
+
+#[test]
 fn notification_show_request_parses() {
     let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
     let request: Request = serde_json::from_str(json).unwrap();
@@ -364,59 +414,6 @@ fn agent_view_requests_round_trip() {
     let request: Request = serde_json::from_value(clear_json.clone()).unwrap();
     assert!(matches!(request.method, Method::AgentViewClear(_)));
     assert_eq!(serde_json::to_value(request).unwrap(), clear_json);
-}
-
-#[test]
-fn provider_agent_protocol_requests_and_focus_subscription_round_trip() {
-    let replace = Request {
-        id: "provider-replace".into(),
-        method: Method::AgentProviderReplace(AgentProviderReplaceParams {
-            source: "fleet:test".into(),
-            revision: 3,
-            viewer: AgentProviderViewer {
-                workspace_id: "w1".into(),
-                pane_id: "w1:p1".into(),
-            },
-            agents: vec![AgentProviderRecord {
-                id: "ctx-302".into(),
-                name: "Review issue 302".into(),
-                agent: Some("codex".into()),
-                title: None,
-                display_agent: Some("Codex · ai-dev-w1".into()),
-                agent_status: AgentStatus::Working,
-                state_labels: Default::default(),
-                tokens: Default::default(),
-                state_change_seq: Some(7),
-            }],
-        }),
-    };
-    let json = serde_json::to_value(&replace).unwrap();
-    assert_eq!(json["method"], "agent.provider.replace");
-    let restored: Request = serde_json::from_value(json).unwrap();
-    assert_eq!(restored, replace);
-
-    let focus = Request {
-        id: "provider-focus".into(),
-        method: Method::AgentProviderFocus(AgentProviderTarget {
-            source: "fleet:test".into(),
-            id: "ctx-302".into(),
-        }),
-    };
-    let json = serde_json::to_value(&focus).unwrap();
-    assert_eq!(json["method"], "agent.provider.focus");
-    let restored: Request = serde_json::from_value(json).unwrap();
-    assert_eq!(restored, focus);
-
-    let subscription = Request {
-        id: "provider-events".into(),
-        method: Method::EventsSubscribe(EventsSubscribeParams {
-            subscriptions: vec![Subscription::AgentProviderFocused {}],
-        }),
-    };
-    let json = serde_json::to_string(&subscription).unwrap();
-    assert!(json.contains("agent.provider_focused"));
-    let restored: Request = serde_json::from_str(&json).unwrap();
-    assert_eq!(restored, subscription);
 }
 
 #[test]
@@ -712,6 +709,12 @@ fn scroll_changed_subscription_event_round_trips() {
 }
 
 #[test]
+fn agent_status_request_values_remain_strict() {
+    assert!(serde_json::from_str::<AgentStatus>(r#""working""#).is_ok());
+    assert!(serde_json::from_str::<AgentStatus>(r#""future_status""#).is_err());
+}
+
+#[test]
 fn success_response_round_trips() {
     let response = SuccessResponse {
         id: "req_1".into(),
@@ -721,7 +724,9 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
-                agent_provider: true,
+                endpoint_protocol_generation: Some(1),
+                surface_interest: true,
+                health_check: true,
             }),
         },
     };
@@ -774,10 +779,12 @@ fn worktree_request_and_response_round_trip() {
             branch: Some("worktree/api".into()),
             base: Some("HEAD".into()),
             focus: true,
+            trust_repository: true,
             ..WorktreeCreateParams::default()
         }),
     };
     let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"trust_repository\":true"));
     let restored: Request = serde_json::from_str(&json).unwrap();
     assert_eq!(restored, request);
 
@@ -1313,6 +1320,32 @@ fn event_wait_parses_typed_match() {
             agent_status: AgentStatus::Done,
         }
     );
+}
+
+#[test]
+fn pane_link_activate_round_trips() {
+    let request = Request {
+        id: "req_pane_link".into(),
+        method: Method::PaneLinkActivate(PaneLinkActivateParams {
+            pane_id: "w1:p1".into(),
+            viewport_row: 3,
+            col: 7,
+            content_revision: Some(42),
+            offset_from_bottom: Some(5),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.link.activate");
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, request);
+
+    let response = ResponseResult::PaneLinkActivated {
+        url: Some("https://example.test".into()),
+        handled: false,
+    };
+    let json = serde_json::to_string(&response).unwrap();
+    let restored: ResponseResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored, response);
 }
 
 #[test]

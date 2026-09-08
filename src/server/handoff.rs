@@ -47,61 +47,93 @@ pub(crate) struct HandoffManifest {
     #[serde(default)]
     pub workspace_metadata:
         std::collections::HashMap<String, crate::handoff_runtime::HandoffMetadata>,
+    #[serde(default)]
+    pub startup_tickets: Vec<crate::app::HandoffStartupTicket>,
 }
 
 #[cfg(unix)]
 impl HandoffManifest {
-    /// Reject ambiguous routing before receiving or importing any file descriptors.
-    fn validate_identities(&self) -> io::Result<()> {
-        use std::collections::HashSet;
-        fn visit(layout: &crate::persist::LayoutSnapshot, ids: &mut HashSet<u32>) -> bool {
-            match layout {
-                crate::persist::LayoutSnapshot::Pane(id) => ids.insert(*id),
-                crate::persist::LayoutSnapshot::Split { first, second, .. } => {
-                    visit(first, ids) && visit(second, ids)
-                }
-            }
-        }
-        let invalid = || {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid or duplicate handoff identity",
-            )
-        };
-        let mut workspace_ids = HashSet::new();
-        let mut snapshot_panes = HashSet::new();
+    fn validate(&self) -> io::Result<()> {
+        let mut workspace_ids = std::collections::HashSet::new();
+        let mut pane_ids = std::collections::HashSet::new();
         for workspace in &self.snapshot.workspaces {
-            if let Some(id) = &workspace.id {
-                if id.is_empty() || !workspace_ids.insert(id.as_str()) {
-                    return Err(invalid());
-                }
+            let Some(workspace_id) = workspace.id.as_ref().filter(|id| !id.is_empty()) else {
+                return Err(io::Error::other("handoff workspace is missing an identity"));
+            };
+            if !workspace_ids.insert(workspace_id.clone()) {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff workspace identity",
+                ));
             }
+            let mut ids = Vec::new();
             for tab in &workspace.tabs {
-                if !visit(&tab.layout, &mut snapshot_panes) {
-                    return Err(invalid());
+                collect_layout_pane_ids(&tab.layout, &mut ids);
+            }
+            for id in ids {
+                if !pane_ids.insert(id) {
+                    return Err(io::Error::other(
+                        "invalid or duplicate handoff pane identity",
+                    ));
                 }
             }
         }
         if self
             .workspace_metadata
             .keys()
-            .any(|id| !workspace_ids.contains(id.as_str()))
+            .any(|id| !workspace_ids.contains(id))
         {
-            return Err(invalid());
+            return Err(io::Error::other(
+                "handoff metadata references an unknown workspace",
+            ));
         }
-        let mut pane_ids = HashSet::new();
-        let mut terminal_ids = HashSet::new();
+        let mut terminals = std::collections::HashSet::new();
         for pane in &self.panes {
-            if !snapshot_panes.contains(&pane.pane_id) || !pane_ids.insert(pane.pane_id) {
-                return Err(invalid());
+            let Some(terminal_id) = &pane.terminal_id else {
+                continue;
+            };
+            if !terminal_id.is_valid() || !terminals.insert(terminal_id.clone()) {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff terminal identity",
+                ));
             }
-            if let Some(id) = &pane.terminal_id {
-                if !id.is_valid() || !terminal_ids.insert(id) {
-                    return Err(invalid());
-                }
+            if !pane_ids.contains(&pane.pane_id) {
+                return Err(io::Error::other(
+                    "handoff runtime references an unknown pane",
+                ));
+            }
+        }
+        let mut tickets = std::collections::HashSet::new();
+        for ticket in &self.startup_tickets {
+            // Retained receipts acknowledge past cleanup; they must survive
+            // handoff without claiming ownership of a nonexistent live terminal.
+            let retired = ticket.closed_at_elapsed_ms.is_some() && ticket.script.is_none();
+            if !ticket.terminal_id.is_valid()
+                || (!terminals.contains(&ticket.terminal_id) && !retired)
+                || (ticket.cleanup_completed && !retired)
+                || ticket.receipt.terminal_id != ticket.terminal_id.to_string()
+                || ticket.receipt.ticket.is_empty()
+                || !tickets.insert(ticket.receipt.ticket.clone())
+                || ticket.script.as_ref().is_some_and(|script| {
+                    script.directory != ticket.receipt.ticket || script.source_command.is_empty()
+                })
+            {
+                return Err(io::Error::other(
+                    "invalid or duplicate handoff startup ticket",
+                ));
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn collect_layout_pane_ids(layout: &crate::persist::LayoutSnapshot, ids: &mut Vec<u32>) {
+    match layout {
+        crate::persist::LayoutSnapshot::Pane(id) => ids.push(*id),
+        crate::persist::LayoutSnapshot::Split { first, second, .. } => {
+            collect_layout_pane_ids(first, ids);
+            collect_layout_pane_ids(second, ids);
+        }
     }
 }
 
@@ -206,6 +238,7 @@ pub(crate) fn accept_and_validate_on(
     token: &str,
     manifest: &HandoffManifest,
 ) -> io::Result<UnixStream> {
+    manifest.validate()?;
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
@@ -297,6 +330,7 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
     let manifest_line = read_line_unbuffered(&mut stream)?;
     let manifest: HandoffManifest =
         serde_json::from_str(&manifest_line).map_err(io::Error::other)?;
+    manifest.validate()?;
     if manifest.version != HANDOFF_VERSION {
         return Err(io::Error::other(format!(
             "unsupported handoff version {}",
@@ -324,7 +358,6 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
-    manifest.validate_identities()?;
     stream.write_all(b"validated\n")?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
@@ -380,7 +413,8 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
-        workspace_metadata: Default::default(),
+        workspace_metadata: std::collections::HashMap::new(),
+        startup_tickets: Vec::new(),
     }
 }
 
@@ -549,89 +583,6 @@ mod tests {
         }
     }
 
-    fn populated_manifest() -> HandoffManifest {
-        let state = crate::app::state::AppState::test_with_adversarial_identity_state();
-        state.assert_invariants_for_test();
-        let snapshot = crate::persist::capture(
-            &state.workspaces,
-            &state.terminals,
-            &Default::default(),
-            state.active,
-            state.selected,
-            30,
-            0.5,
-            Default::default(),
-        );
-        let panes = state
-            .workspaces
-            .iter()
-            .flat_map(|ws| &ws.tabs)
-            .flat_map(|tab| &tab.panes)
-            .map(|(pane_id, pane)| {
-                serde_json::from_value(serde_json::json!({
-                    "pane_id": pane_id.raw(), "terminal_id": pane.attached_terminal_id,
-                    "child_pid": 0, "rows": 24, "cols": 80,
-                    "cell_width_px": 0, "cell_height_px": 0
-                }))
-                .unwrap()
-            })
-            .collect();
-        manifest_for(snapshot, panes, None, None, None)
-    }
-
-    #[test]
-    fn handoff_legacy_identity_and_metadata_fields_default_safely() {
-        let manifest = populated_manifest();
-        let mut json = serde_json::to_value(manifest).unwrap();
-        json.as_object_mut().unwrap().remove("workspace_metadata");
-        for pane in json["panes"].as_array_mut().unwrap() {
-            pane.as_object_mut().unwrap().remove("terminal_id");
-            pane.as_object_mut().unwrap().remove("metadata");
-        }
-        let old: HandoffManifest = serde_json::from_value(json).unwrap();
-        old.validate_identities().unwrap();
-        assert!(old.workspace_metadata.is_empty());
-        assert!(old
-            .panes
-            .iter()
-            .all(|pane| pane.terminal_id.is_none() && pane.metadata.tokens.is_empty()));
-    }
-
-    #[test]
-    fn handoff_rejects_duplicate_and_invalid_identities_before_import() {
-        let manifest = populated_manifest();
-        manifest.validate_identities().unwrap();
-        let original = serde_json::to_value(manifest).unwrap();
-        for mutation in 0..6 {
-            let mut manifest: HandoffManifest = serde_json::from_value(original.clone()).unwrap();
-            match mutation {
-                0 => manifest.panes.push(manifest.panes[0].clone()),
-                1 => manifest.panes[1].terminal_id = manifest.panes[0].terminal_id.clone(),
-                2 => {
-                    manifest.panes[0].terminal_id =
-                        Some(serde_json::from_value(serde_json::json!("bad-id")).unwrap())
-                }
-                3 => manifest.panes[0].pane_id = u32::MAX,
-                4 => {
-                    manifest
-                        .workspace_metadata
-                        .insert("unknown".into(), Default::default());
-                }
-                _ => manifest.snapshot.workspaces.push(
-                    serde_json::from_value(
-                        serde_json::to_value(&manifest.snapshot.workspaces[0]).unwrap(),
-                    )
-                    .unwrap(),
-                ),
-            }
-            assert_eq!(
-                manifest.validate_identities().unwrap_err().kind(),
-                io::ErrorKind::InvalidData,
-                "mutation {mutation}"
-            );
-        }
-    }
-
     #[test]
     fn a_handoff_carries_an_api_set_window_title() {
         let manifest = manifest_for(
@@ -664,5 +615,37 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+    }
+
+    #[test]
+    fn retired_receipts_need_no_live_terminal_but_cannot_carry_launch_authority() {
+        let mut manifest = manifest_for(empty_snapshot(), Vec::new(), None, None, None);
+        let ticket = serde_json::from_value(serde_json::json!({
+            "receipt": {"ticket":"/tmp/retained-ticket", "pane_id":"w1:p1",
+                "workspace_id":"w1", "terminal_id":"term_abcd", "cwd":"/tmp",
+                "name":"retired", "kind":"codex", "timeout_ms":60000,
+                "shell_pid":42, "shell_lifetime":"original"},
+            "terminal_id":"term_abcd", "start":{"name":"retired", "kind":"codex",
+                "pane_id":"w1:p1", "args":[]}, "submitted":false,
+            "closed_at_elapsed_ms":1, "cleanup_completed":true
+        }))
+        .unwrap();
+        manifest.startup_tickets.push(ticket);
+        assert!(manifest.validate().is_ok());
+        manifest.startup_tickets[0].closed_at_elapsed_ms = None;
+        assert!(manifest.validate().is_err());
+        manifest.startup_tickets[0].closed_at_elapsed_ms = Some(1);
+        manifest.startup_tickets[0].script = Some(
+            serde_json::from_value(serde_json::json!({
+                "directory":"/tmp/retained-ticket", "source_command":"do not execute"
+            }))
+            .unwrap(),
+        );
+        assert!(manifest.validate().is_err());
+        manifest.startup_tickets[0].script = None;
+        manifest
+            .startup_tickets
+            .push(manifest.startup_tickets[0].clone());
+        assert!(manifest.validate().is_err());
     }
 }

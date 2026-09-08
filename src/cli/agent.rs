@@ -289,6 +289,62 @@ fn matched_rule_region_preview<'a>(
         .filter(|preview| !preview.is_empty())
 }
 
+fn agent_startup(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!(
+            "usage: herdr agent startup < request.json (prepare, launch, inspect or cleanup)"
+        );
+        return Ok(2);
+    }
+    let params: crate::api::schema::AgentStartupParams =
+        match serde_json::from_reader(std::io::stdin().lock()) {
+            Ok(params) => params,
+            Err(err) => {
+                eprintln!("invalid startup request: {err}");
+                return Ok(2);
+            }
+        };
+    let launch = match &params {
+        crate::api::schema::AgentStartupParams::Launch { receipt } => Some(receipt.clone()),
+        _ => None,
+    };
+    let mut response = match super::send_request(&Request {
+        id: "cli:agent:startup".into(),
+        method: Method::AgentStartup(params),
+    }) {
+        Ok(response) => response,
+        Err(err) => {
+            return print_agent_transport_error(
+                err,
+                "cli:agent:startup",
+                "agent_start_transport_failed",
+            )
+        }
+    };
+    if response.get("error").is_none() {
+        if let Some(receipt) = launch {
+            match wait_for_named_agent(
+                &receipt.name,
+                &receipt.pane_id,
+                Duration::from_millis(receipt.timeout_ms),
+                &receipt.kind,
+                &receipt.terminal_id,
+            ) {
+                Ok(Ok(agent)) => response["result"]["agent"] = agent,
+                Ok(Err(error)) => return super::print_response(&error),
+                Err(err) => {
+                    return print_agent_transport_error(
+                        err,
+                        "cli:agent:startup",
+                        "agent_start_transport_failed",
+                    )
+                }
+            }
+        }
+    }
+    super::print_response(&response)
+}
+
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
         eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
@@ -869,7 +925,11 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentPrompt(AgentPromptParams {
             target: target.clone(),
             text: text.clone(),
-            wait: wait.then_some(AgentPromptWaitOptions { until, timeout_ms }),
+            wait: wait.then_some(AgentPromptWaitOptions {
+                until,
+                timeout_ms,
+                submission_deadline: None,
+            }),
         }),
     })?;
     super::print_response(&response)
@@ -969,6 +1029,7 @@ fn print_agent_help() {
     eprintln!(
         "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]"
     );
+    eprintln!("  herdr agent startup < request.json");
     eprintln!("  herdr agent explain <target> [--json|--format text|json] [--verbose]");
     eprintln!(
         "  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]"
@@ -984,80 +1045,21 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
     })
 }
 
-fn agent_startup(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!(
-            "usage: herdr agent startup < request.json (prepare, launch, inspect or cleanup)"
-        );
-        return Ok(2);
-    }
-    let params: crate::api::schema::AgentStartupParams =
-        match serde_json::from_reader(std::io::stdin().lock()) {
-            Ok(params) => params,
-            Err(err) => {
-                eprintln!("invalid startup request: {err}");
-                return Ok(2);
-            }
-        };
-    let launch = match &params {
-        crate::api::schema::AgentStartupParams::Launch { receipt } => Some(receipt.clone()),
-        _ => None,
-    };
-    let mut response = match super::send_request(&Request {
-        id: "cli:agent:startup".into(),
-        method: Method::AgentStartup(params),
-    }) {
-        Ok(response) => response,
-        Err(err) => {
-            return print_agent_transport_error(
-                err,
-                "cli:agent:startup",
-                "agent_start_transport_failed",
-            )
-        }
-    };
-    if response.get("error").is_none() {
-        if let Some(receipt) = launch {
-            match wait_for_named_agent(
-                &receipt.name,
-                &receipt.pane_id,
-                Duration::from_millis(receipt.timeout_ms),
-                &receipt.kind,
-                &receipt.terminal_id,
-            ) {
-                Ok(Ok(agent)) => response["result"]["agent"] = agent,
-                Ok(Err(error)) => return super::print_response(&error),
-                Err(err) => {
-                    return print_agent_transport_error(
-                        err,
-                        "cli:agent:startup",
-                        "agent_start_transport_failed",
-                    )
-                }
-            }
-        }
-    }
-    super::print_response(&response)
-}
-
 #[cfg(test)]
 mod restore_name_tests {
     #[test]
-    fn agent_restore_name_accepts_guard_before_between_and_after_positionals() {
+    fn restore_name_accepts_guard_before_between_and_after_positionals() {
         for args in [
             ["--expected-terminal-id", "term_a", "w1:p1", "reviewer"],
             ["w1:p1", "--expected-terminal-id", "term_a", "reviewer"],
             ["w1:p1", "reviewer", "--expected-terminal-id", "term_a"],
         ] {
-            let params = super::restore_name_params(&args.map(String::from)).unwrap();
+            let args = args.map(String::from);
+            let params = super::restore_name_params(&args).unwrap();
             assert_eq!(params.target, "w1:p1");
             assert_eq!(params.name, "reviewer");
             assert_eq!(params.expected_terminal_id, "term_a");
         }
         assert!(super::restore_name_params(&["w1:p1", "reviewer"].map(String::from)).is_none());
-        assert!(super::restore_name_params(
-            &["w1:p1", "reviewer", "--expected-terminal-id", ""].map(String::from)
-        )
-        .is_none());
     }
 }

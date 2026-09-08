@@ -102,7 +102,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | 弹窗 | `popup.close` |
 | 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.view.set`、`agent.view.clear`、`agent.provider.replace`、`agent.provider.clear`、`agent.provider.get`、`agent.provider.snapshot`、`agent.provider.focus`、`agent.provider.focused` |
+| 智能体 | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
@@ -145,9 +145,9 @@ CLI 的 `herdr api snapshot` 会把当前 `session.snapshot` 响应输出为 JSO
 
 客户端可以把 `offset_from_bottom == 0` 视为位于底部。
 
-### 实验性窗格图形
+### 窗格图形
 
-窗格图形允许插件在窗格上放置图像数据。它们只在 `[experimental].kitty_graphics = true` 时可用;否则所有窗格图形方法都返回 `feature_disabled`。调用 `pane.graphics.info` 会返回所连接客户端的单元格像素宽度和高度,但不会创建图形层。`pane.graphics.set` 接受 `data_base64` 中的 `png`、`rgb` 或 `rgba` 数据,`pane.graphics.clear` 删除该图层。
+窗格图形允许插件在窗格上放置图像数据。该功能默认可用；当服务器设置 `[terminal].kitty_graphics = false` 时，所有窗格图形方法都返回 `feature_disabled`。更改此设置需要重启服务器。调用 `pane.graphics.info` 会返回所连接客户端的单元格像素宽度和高度,但不会创建图形层。`pane.graphics.set` 接受 `data_base64` 中的 `png`、`rgb` 或 `rgba` 数据,`pane.graphics.clear` 删除该图层。
 
 ```json
 {"id":"graphics_info","method":"pane.graphics.info","params":{"pane_id":"w1:p1"}}
@@ -370,41 +370,6 @@ disable、unlink 或 uninstall,或者服务器退出。需要持久行为的插�
 
 source 不匹配时,活动视图保持不变。set 和 clear 响应使用
 `type: "agent_view"`,并报告 `active`、`source` 和可选的 `label`。
-
-## 纯数据智能体提供方
-
-智能体提供方可以把远程或虚拟智能体加入原生 Agents 视图，而不必为每个智能体
-创建本地工作区、窗格或 PTY。提供方记录沿用本地智能体的 status、元数据 token、
-筛选、排序和编排卡片。`agent.list` 仍只返回本地实体智能体，因此一个提供方不会
-再次采集另一个提供方投影出的记录。
-
-`agent.provider.replace` 会原子替换某个 source 的完整快照。revision 从 1 开始并且
-必须递增。viewer 必须指向一个仍然存在的本地窗格。每个 source 最多包含 2,000 条
-记录；每条记录最多包含 8 个 state label 和 32 个元数据 token。元数据键最多使用
-32 个 ASCII 字母、数字、下划线或连字符，值最多包含 256 个字符:
-
-```json
-{"id":"provider_replace","method":"agent.provider.replace","params":{"source":"fleet:default","revision":12,"viewer":{"workspace_id":"w1","pane_id":"w1:p1"},"agents":[{"id":"linux/reviewer","name":"linux · reviewer","agent":"codex","agent_status":"working","tokens":{"orchestration_id":"backlog:default","repository":"example","responsibility":"Review issue 302"}}]}}
-```
-
-使用 `agent.provider.get` 读取一条 source/id 记录，使用
-`agent.provider.snapshot` 读取整个 source 快照。要清空 source，提交更大的
-tombstone revision。清空后仍可读取该快照；响应会保留 revision，省略 viewer，
-并返回空的 `agents` 列表:
-
-```json
-{"id":"provider_get","method":"agent.provider.get","params":{"source":"fleet:default","id":"linux/reviewer"}}
-{"id":"provider_snapshot","method":"agent.provider.snapshot","params":{"source":"fleet:default"}}
-{"id":"provider_clear","method":"agent.provider.clear","params":{"source":"fleet:default","revision":13}}
-```
-
-`agent.provider.focus` 会聚焦 source 共用的 viewer 窗格，同时在侧边栏中保留所选
-提供方记录的身份。`agent.provider.focused` 返回该身份。订阅
-`agent.provider_focused` 可以在选择变化时重新定位 viewer；viewer 失去焦点或所选
-记录消失后，事件中的 `target` 为 `null`。
-
-提供方快照是临时状态。服务器冷启动后需要重新提交。`ping` 响应通过
-`capabilities.agent_provider` 表示是否支持该接口。
 
 ## 插件 API
 
@@ -780,6 +745,6 @@ herdr agent wait w1:p1 --until blocked
 
 ## 协议稳定性
 
-Herdr 有一个用于客户端/服务器兼容性的协议版本。协议变更会在考虑发布兼容性的前提下进行评审。
+由客户端渲染的 Herdr UI 对本地和 SSH 服务器使用稳定的端点代数。客户端和服务器构建不必一致。连接时，双方会协商核心快照、屏幕、输入和 blob 编解码器，服务器则公布支持的 API 方法和可选能力。已保存的 SSH 机器需要 `surface_interest` 来确保只有选中的机器传输窗格画面，并需要 `health_check` 来发现空闲连接的故障。缺少这些能力的服务器会显示 Attention，直到明确更新。详见[连接机器](/zh-cn/docs/connecting-machines/)。缺少方法时,只禁用该服务器上的对应操作并显示客户端本地通知;操作被拒绝或超时也不会断开连接。只有早于端点第 1 代的服务器需要最后更新一次。
 
-在依赖新行为之前,用 `ping` 或 `herdr status` 检查服务器协议。对未知字段做宽容处理。
+带编号的二进制协议仍用于同一安装内的内部操作,包括直接终端连接和实时交接。跨不同构建使用这些操作前,请检查 `ping` 或 `herdr status`。JSON API 客户端应忽略未知字段,并把不支持的方法当作普通错误处理。

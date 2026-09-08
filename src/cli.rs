@@ -26,6 +26,7 @@ mod agent;
 mod api;
 mod completion;
 mod integration;
+mod machine;
 mod notification;
 mod pane;
 mod plugin;
@@ -40,7 +41,7 @@ mod workspace;
 mod worktree;
 
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
-    "usage: herdr terminal session observe <target> [--cols N] [--rows N] [--resize-target]";
+    "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
     "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
 pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
@@ -113,6 +114,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "completion" | "completions" => completion::run_completion_command(&args[2..])?,
         "config" => run_config_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
+        "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -560,7 +562,6 @@ fn terminal_session_control(args: &[String]) -> std::io::Result<i32> {
         TERMINAL_SESSION_CONTROL_USAGE,
         "control",
         true,
-        false,
     )? {
         Ok(options) => options,
         Err(code) => return Ok(code),
@@ -581,18 +582,12 @@ fn terminal_session_observe(args: &[String]) -> std::io::Result<i32> {
         TERMINAL_SESSION_OBSERVE_USAGE,
         "observe",
         false,
-        true,
     )? {
         Ok(options) => options,
         Err(code) => return Ok(code),
     };
 
-    crate::client::run_terminal_session_observe(
-        options.target,
-        options.cols,
-        options.rows,
-        options.resize_target,
-    )?;
+    crate::client::run_terminal_session_observe(options.target, options.cols, options.rows)?;
     Ok(0)
 }
 
@@ -601,7 +596,6 @@ struct TerminalSessionOptions {
     cols: u16,
     rows: u16,
     takeover: bool,
-    resize_target: bool,
 }
 
 fn parse_terminal_session_options(
@@ -609,7 +603,6 @@ fn parse_terminal_session_options(
     usage: &str,
     command: &str,
     allow_takeover: bool,
-    allow_resize_target: bool,
 ) -> std::io::Result<Result<TerminalSessionOptions, i32>> {
     if matches!(
         args.first().map(|arg| arg.as_str()),
@@ -626,16 +619,11 @@ fn parse_terminal_session_options(
     let mut cols = 120;
     let mut rows = 40;
     let mut takeover = false;
-    let mut resize_target = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--takeover" if allow_takeover => {
                 takeover = true;
-                i += 1;
-            }
-            "--resize-target" if allow_resize_target => {
-                resize_target = true;
                 i += 1;
             }
             "--cols" => {
@@ -671,7 +659,6 @@ fn parse_terminal_session_options(
         cols,
         rows,
         takeover,
-        resize_target,
     }))
 }
 
@@ -1037,7 +1024,7 @@ fn print_terminal_help() {
     eprintln!("herdr terminal commands:");
     eprintln!("  herdr terminal attach <terminal_id> [--takeover]");
     eprintln!("  herdr terminal session control <target> [--takeover] [--cols N] [--rows N]");
-    eprintln!("  herdr terminal session observe <target> [--cols N] [--rows N] [--resize-target]");
+    eprintln!("  herdr terminal session observe <target> [--cols N] [--rows N]");
     eprintln!("  herdr terminal title set <title>");
     eprintln!("  herdr terminal title clear");
     eprintln!("  detach from direct attach with ctrl+b q; send literal ctrl+b with ctrl+b ctrl+b");
@@ -1177,29 +1164,5 @@ mod tests {
                 "5000",
             ]
         );
-    }
-
-    #[test]
-    fn terminal_observe_resize_target_is_explicit_and_observe_only() {
-        let observe = super::parse_terminal_session_options(
-            &["agent".into(), "--resize-target".into()],
-            super::TERMINAL_SESSION_OBSERVE_USAGE,
-            "observe",
-            false,
-            true,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(observe.resize_target);
-
-        let control = super::parse_terminal_session_options(
-            &["agent".into(), "--resize-target".into()],
-            super::TERMINAL_SESSION_CONTROL_USAGE,
-            "control",
-            true,
-            false,
-        )
-        .unwrap();
-        assert!(control.is_err());
     }
 }

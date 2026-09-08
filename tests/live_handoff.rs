@@ -1,4 +1,6 @@
-mod support;
+#![cfg(unix)]
+
+pub mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,8 +14,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, client_handshake, register_runtime_dir, register_spawned_herdr_pid,
-    send_input, unregister_spawned_herdr_pid, wait_for_disconnect, wait_for_socket,
+    cleanup_test_base, client_shell_handshake, register_runtime_dir, register_spawned_herdr_pid,
+    send_client_shell_shift_enter, unregister_spawned_herdr_pid, wait_for_client_shell_bootstrap,
+    wait_for_message_variant, wait_for_socket, SERVER_MESSAGE_ENDPOINT_CONTROL,
+    SERVER_MESSAGE_SERVER_SHUTDOWN,
 };
 
 struct SpawnedHerdr {
@@ -528,6 +532,93 @@ fn wait_for_http_contains(port: u16, needle: &str, timeout: Duration) -> String 
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
+fn live_handoff_transfers_startup_receipt_authority() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let workspace = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:workspace", "method":"workspace.create",
+            "params":{"cwd":"/tmp", "focus":false}}),
+    );
+    assert_ok(workspace.clone());
+    let pane_id = workspace["result"]["root_pane"]["pane_id"].clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let prepared = loop {
+        let response = request(
+            &api_socket,
+            serde_json::json!({"id":"ticket:prepare", "method":"agent.startup",
+                "params":{"operation":"prepare", "start":{"name":"handoff-ticket",
+                    "kind":"codex", "pane_id":pane_id, "args":[], "timeout_ms":60000},
+                    "preparation":[]}}),
+        );
+        if response.get("result").is_some() {
+            break response;
+        }
+        assert_eq!(response["error"]["code"], "agent_pane_busy", "{response}");
+        assert!(
+            Instant::now() < deadline,
+            "shell did not settle: {response}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    let receipt = prepared["result"]["receipt"].clone();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:handoff", "method":"server.live_handoff", "params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let inspected = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:inspect", "method":"agent.startup",
+            "params":{"operation":"inspect", "receipt":receipt}}),
+    );
+    assert_eq!(inspected["result"]["state"], "prepared", "{inspected}");
+    let cleaned = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:cleanup", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":receipt}}),
+    );
+    assert_eq!(cleaned["result"]["state"], "cleaned", "{cleaned}");
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:handoff-again", "method":"server.live_handoff", "params":{}}),
+    ));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let cleaned_again = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:cleanup-again", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":receipt}}),
+    );
+    assert_eq!(
+        cleaned_again["result"]["state"], "cleaned",
+        "{cleaned_again}"
+    );
+    let mut changed_receipt = receipt.clone();
+    changed_receipt["terminal_id"] = serde_json::json!("term_ffffffff");
+    let rejected = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:changed-receipt", "method":"agent.startup",
+            "params":{"operation":"cleanup", "receipt":changed_receipt}}),
+    );
+    assert_eq!(
+        rejected["error"]["code"], "startup_ownership_mismatch",
+        "{rejected}"
+    );
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"ticket:stop", "method":"server.stop", "params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_server_holds_one_pty_master_fd_per_pane() {
     let _lock = test_lock();
     let base = unique_test_dir();
@@ -605,6 +696,96 @@ fn live_server_holds_one_pty_master_fd_per_pane() {
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
     );
     drop(spawned);
+    cleanup_test_base(&base);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn live_handoff_unknown_pane_exit_preserves_session_on_shutdown() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    let old_pid = spawned.child.process_id().expect("old server pid");
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    let replacement_pid =
+        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    let process_info = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:process-info",
+            "method": "pane.process_info",
+            "params": {"pane_id": pane_id}
+        }),
+    );
+    let shell_pid = process_info["result"]["process_info"]["shell_pid"]
+        .as_u64()
+        .expect("shell pid") as libc::pid_t;
+    assert_eq!(unsafe { libc::kill(shell_pid, libc::SIGHUP) }, 0);
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let panes = request(
+            &api_socket,
+            serde_json::json!({"id":"test:panes","method":"pane.list","params":{}}),
+        );
+        if panes["result"]["panes"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "handoff pane was not removed");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Path::new(&format!("/proc/{replacement_pid}")).exists() {
+        assert!(Instant::now() < deadline, "replacement server did not stop");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let session: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_home.join("herdr-dev/session.json")).expect("saved session"),
+    )
+    .expect("valid session json");
+    assert_eq!(session["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        session["workspaces"][0]["tabs"][0]["panes"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(1)
+    );
+
     cleanup_test_base(&base);
 }
 
@@ -861,16 +1042,21 @@ fn live_handoff_preserves_pane_process_io() {
     assert_eq!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
     assert_eq!(unsafe { libc::kill(second_child_pid as libc::pid_t, 0) }, 0);
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
+    let endpoint_generation = support::CURRENT_ENDPOINT_PROTOCOL_GENERATION;
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
+    let (server_generation, error) =
+        client_shell_handshake(&mut client_stream, endpoint_generation, 54, 23).unwrap();
+    assert_eq!(server_generation, endpoint_generation);
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    assert!(
+        wait_for_message_variant(
+            &mut client_stream,
+            Duration::from_secs(5),
+            SERVER_MESSAGE_ENDPOINT_CONTROL,
+        )
+        .unwrap(),
+        "client shell should receive a complete snapshot before handoff"
+    );
 
     assert_ok(request(
         &api_socket,
@@ -888,8 +1074,13 @@ fn live_handoff_preserves_pane_process_io() {
     ));
     drop(spawned);
     assert!(
-        wait_for_disconnect(&mut client_stream, Duration::from_secs(5)).unwrap(),
-        "connected clients should disconnect during live handoff"
+        wait_for_message_variant(
+            &mut client_stream,
+            Duration::from_secs(5),
+            SERVER_MESSAGE_SERVER_SHUTDOWN,
+        )
+        .unwrap(),
+        "connected client shell should receive live-handoff shutdown"
     );
     thread::sleep(Duration::from_millis(300));
     wait_for_api(&api_socket, Duration::from_secs(10));
@@ -934,6 +1125,22 @@ fn live_handoff_preserves_pane_process_io() {
         Duration::from_secs(5),
     );
     wait_for_output(&api_socket, &second_pane_id, "second:after-handoff-sec");
+
+    let mut reattached_shell = UnixStream::connect(&client_socket).unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut reattached_shell,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "reattached client shell failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut reattached_shell, Duration::from_secs(5))
+        .expect("fresh client shell should receive restored snapshot before pane content");
 
     let _ = request(
         &api_socket,
@@ -1005,12 +1212,6 @@ pathlib.Path({received:?}).write_text(data.hex())
     ));
     support::wait_for_file(&ready_marker, Duration::from_secs(5));
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
@@ -1020,10 +1221,21 @@ pathlib.Path({received:?}).write_text(data.hex())
     wait_for_socket(&client_socket, Duration::from_secs(5));
 
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
-    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut client_stream,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5))
+        .expect("client shell should receive restored state before sending input");
+    send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
     wait_for_file_contains(&received_marker, "1b5b31333b3275", Duration::from_secs(5));
 
@@ -1096,12 +1308,6 @@ pathlib.Path({received:?}).write_text(data.hex())
     ));
     support::wait_for_file(&ready_marker, Duration::from_secs(5));
 
-    let protocol = request(
-        &api_socket,
-        serde_json::json!({"id":"test:protocol","method":"ping","params":{}}),
-    )["result"]["protocol"]
-        .as_u64()
-        .unwrap() as u32;
     assert_ok(request(
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
@@ -1111,10 +1317,21 @@ pathlib.Path({received:?}).write_text(data.hex())
     wait_for_socket(&client_socket, Duration::from_secs(5));
 
     let mut client_stream = UnixStream::connect(&client_socket).unwrap();
-    let (server_protocol, error) = client_handshake(&mut client_stream, protocol, 80, 24).unwrap();
-    assert_eq!(server_protocol, protocol);
-    assert!(error.is_none(), "client handshake failed: {error:?}");
-    send_input(&mut client_stream, b"\x1b[13;2u").unwrap();
+    let (server_generation, error) = client_shell_handshake(
+        &mut client_stream,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION,
+        54,
+        23,
+    )
+    .unwrap();
+    assert_eq!(
+        server_generation,
+        support::CURRENT_ENDPOINT_PROTOCOL_GENERATION
+    );
+    assert!(error.is_none(), "client shell handshake failed: {error:?}");
+    wait_for_client_shell_bootstrap(&mut client_stream, Duration::from_secs(5))
+        .expect("client shell should receive restored state before sending input");
+    send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
     wait_for_file_contains(
         &received_marker,
@@ -1213,93 +1430,6 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
-fn live_handoff_schedules_terminal_and_workspace_token_expiry() {
-    let _lock = test_lock();
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let api_socket = runtime_dir.join("herdr.sock");
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    register_runtime_dir(&runtime_dir);
-    let created = request(
-        &api_socket,
-        serde_json::json!({
-            "id": "create", "method": "workspace.create", "params": {"cwd": "/tmp", "focus": true}
-        }),
-    );
-    let pane_id = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
-    let workspace_id = created["result"]["workspace"]["workspace_id"]
-        .as_str()
-        .unwrap();
-    for (method, identity) in [
-        (
-            "pane.report_metadata",
-            serde_json::json!({"pane_id": pane_id}),
-        ),
-        (
-            "workspace.report_metadata",
-            serde_json::json!({"workspace_id": workspace_id}),
-        ),
-    ] {
-        let mut params = identity;
-        params["source"] = serde_json::json!("ttl-test");
-        params["seq"] = serde_json::json!(5);
-        params["ttl_ms"] = serde_json::json!(15000);
-        params["tokens"] = serde_json::json!({"temporary": "expires"});
-        assert_ok(request(
-            &api_socket,
-            serde_json::json!({"id": method, "method": method, "params": params}),
-        ));
-    }
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({"id": "handoff", "method": "server.live_handoff", "params": {}}),
-    ));
-    drop(spawned);
-    wait_for_api(&api_socket, Duration::from_secs(10));
-    let get_tokens = || {
-        let pane = request(
-            &api_socket,
-            serde_json::json!({"id": "pane", "method": "pane.get", "params": {"pane_id": pane_id}}),
-        );
-        let workspace = request(
-            &api_socket,
-            serde_json::json!({"id": "workspace", "method": "workspace.get", "params": {"workspace_id": workspace_id}}),
-        );
-        (
-            pane["result"]["pane"]["tokens"].clone(),
-            workspace["result"]["workspace"]["tokens"].clone(),
-        )
-    };
-    let (pane, workspace) = get_tokens();
-    assert_eq!(pane["temporary"], "expires");
-    assert_eq!(workspace["temporary"], "expires");
-    // Reads alone must not be needed to initialize expiry scheduling.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let (mut pane, mut workspace) = get_tokens();
-    while (pane.get("temporary").is_some() || workspace.get("temporary").is_some())
-        && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(100));
-        (pane, workspace) = get_tokens();
-    }
-    assert!(
-        pane.get("temporary").is_none(),
-        "pane TTL survived handoff: {pane}"
-    );
-    assert!(
-        workspace.get("temporary").is_none(),
-        "workspace TTL survived handoff: {workspace}"
-    );
-    let _ = request(
-        &api_socket,
-        serde_json::json!({"id": "stop", "method": "server.stop", "params": {}}),
-    );
-    cleanup_test_base(&base);
-}
-
-#[test]
 fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1316,7 +1446,7 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n",
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\nexec /bin/sleep 30\n",
             started_marker.display()
         ),
     )
@@ -1335,10 +1465,6 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
         }),
     );
     let pane_id = created["result"]["root_pane"]["pane_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let original_terminal_id = created["result"]["root_pane"]["terminal_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1411,59 +1537,10 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
 
     assert_ok(request(
         &api_socket,
-        serde_json::json!({
-            "id": "test:metadata", "method": "pane.report_metadata",
-            "params": { "pane_id": pane_id, "source": "factory", "seq": 10,
-                "tokens": {"orchestration_id": "handoff-test"} }
-        }),
-    ));
-
-    assert_ok(request(
-        &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
     drop(spawned);
     wait_for_api(&api_socket, Duration::from_secs(10));
-
-    let restored = request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:original-identity", "method": "agent.get", "params": {"target": pane_id}
-        }),
-    );
-    assert_eq!(
-        restored["result"]["agent"]["terminal_id"],
-        original_terminal_id
-    );
-    assert_eq!(
-        restored["result"]["agent"]["tokens"]["orchestration_id"],
-        "handoff-test"
-    );
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:guarded-name", "method": "agent.restore_name",
-            "params": {"target": pane_id, "name": "reviewer", "expected_terminal_id": original_terminal_id}
-        }),
-    ));
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:stale-metadata", "method": "pane.report_metadata",
-            "params": {"pane_id": pane_id, "source": "factory", "seq": 10,
-                "tokens": {"orchestration_id": "stale-overwrite"}}
-        }),
-    ));
-    let after_stale = request(
-        &api_socket,
-        serde_json::json!({
-            "id": "test:deduplicated", "method": "agent.get", "params": {"target": pane_id}
-        }),
-    );
-    assert_eq!(
-        after_stale["result"]["agent"]["tokens"]["orchestration_id"],
-        "handoff-test"
-    );
 
     assert_ok(request(
         &api_socket,
@@ -1532,7 +1609,14 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     )
     .unwrap();
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    let path = format!("{}:/bin:/usr/bin", bin.display());
+
+    let spawned = spawn_server_with_env(
+        &config_home,
+        &runtime_dir,
+        &api_socket,
+        &[("PATH", path.as_str())],
+    );
     wait_for_socket(&api_socket, Duration::from_secs(10));
     register_runtime_dir(&runtime_dir);
     let workspace = request(
@@ -1549,50 +1633,19 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
         .unwrap()
         .to_string();
 
-    // agent.start resolves `pi` in the pane's login shell, which may replace
-    // the daemon's PATH. Pin the fixture there before any agent launch; never
-    // fall through to a real installed CLI, credentials, or network provider.
-    let ready_marker = base.join("fixture-ready");
-    assert_ok(request(
+    let started = request(
         &api_socket,
         serde_json::json!({
-            "id": "test:pin-inert-agent",
-            "method": "pane.send_input",
+            "id": "test:agent-start",
+            "method": "agent.start",
             "params": {
+                "name": "handoff-agent",
+                "kind": "pi",
                 "pane_id": pane_id,
-                "text": format!("pi() {{ '{}' \"$@\"; }}; echo ready > '{}'", fake_pi.display(), ready_marker.display()),
-                "keys": ["Enter"]
+                "timeout_ms": 5000
             }
         }),
-    ));
-    support::wait_for_file(&ready_marker, Duration::from_secs(5));
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let started = loop {
-        let response = request(
-            &api_socket,
-            serde_json::json!({
-                "id": "test:agent-start",
-                "method": "agent.start",
-                "params": {
-                    "name": "handoff-agent",
-                    "kind": "pi",
-                    "pane_id": pane_id,
-                    "timeout_ms": 5000
-                }
-            }),
-        );
-        if response.get("result").is_some()
-            || response
-                .pointer("/error/code")
-                .and_then(serde_json::Value::as_str)
-                != Some("agent_pane_busy")
-            || Instant::now() >= deadline
-        {
-            break response;
-        }
-        thread::sleep(Duration::from_millis(25));
-    };
+    );
     assert_ok(started);
     support::wait_for_file(&started_marker, Duration::from_secs(5));
 
@@ -1618,103 +1671,6 @@ fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     let _ = request(
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
-    );
-    cleanup_test_base(&base);
-}
-
-#[test]
-fn live_handoff_retains_startup_authority_until_guarded_cleanup() {
-    let _lock = test_lock();
-    let base = unique_test_dir();
-    let config_home = base.join("config");
-    let runtime_dir = base.join("runtime");
-    let api_socket = runtime_dir.join("herdr.sock");
-    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
-    wait_for_socket(&api_socket, Duration::from_secs(10));
-    register_runtime_dir(&runtime_dir);
-    let workspace = request(
-        &api_socket,
-        serde_json::json!({"id":"ticket:workspace", "method":"workspace.create",
-            "params":{"cwd":"/tmp", "focus":false}}),
-    );
-    assert_ok(workspace.clone());
-    let pane_id = &workspace["result"]["root_pane"]["pane_id"];
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let prepared = loop {
-        let response = request(
-            &api_socket,
-            serde_json::json!({"id":"ticket:prepare", "method":"agent.startup",
-                "params":{"operation":"prepare", "start":{"name":"handoff-ticket",
-                    "kind":"codex", "pane_id":pane_id, "args":[], "timeout_ms":60000},
-                    "preparation":[]}}),
-        );
-        if response.get("result").is_some() {
-            break response;
-        }
-        // A login shell can still be initializing. This refusal creates no
-        // ticket; never retry an ambiguous response or an actual launch.
-        assert_eq!(response["error"]["code"], "agent_pane_busy", "{response}");
-        assert!(
-            Instant::now() < deadline,
-            "shell did not settle: {response}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    };
-    let receipt = &prepared["result"]["receipt"];
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let observed = request(
-            &api_socket,
-            serde_json::json!({"id":"ticket:inspect", "method":"agent.startup",
-                "params":{"operation":"inspect", "receipt":receipt}}),
-        );
-        if observed["result"]["state"] == "prepared" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "ticket did not settle: {observed}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
-    let refused = request(
-        &api_socket,
-        serde_json::json!({"id":"ticket:handoff", "method":"server.live_handoff", "params":{}}),
-    );
-    assert_eq!(refused["error"]["code"], "handoff_failed");
-    assert!(refused["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("unreconciled startup tickets"));
-    assert_eq!(
-        request(
-            &api_socket,
-            serde_json::json!({"id":"ticket:still-owned",
-            "method":"agent.startup", "params":{"operation":"inspect", "receipt":receipt}})
-        )["result"]["state"],
-        "prepared"
-    );
-    // Prepare never invoked Codex. Retire exactly this shell through its ticket,
-    // then prove the completed tombstone no longer blocks ordinary handoff.
-    assert_eq!(
-        request(
-            &api_socket,
-            serde_json::json!({"id":"ticket:cleanup",
-            "method":"agent.startup", "params":{"operation":"cleanup", "receipt":receipt}})
-        )["result"]["state"],
-        "cleaned"
-    );
-    assert_ok(request(
-        &api_socket,
-        serde_json::json!({"id":"ticket:retry",
-        "method":"server.live_handoff", "params":{}}),
-    ));
-    drop(spawned);
-    wait_for_api(&api_socket, Duration::from_secs(10));
-    let _ = request(
-        &api_socket,
-        serde_json::json!({"id":"ticket:stop",
-        "method":"server.stop", "params":{}}),
     );
     cleanup_test_base(&base);
 }

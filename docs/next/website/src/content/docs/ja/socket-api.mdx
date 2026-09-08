@@ -102,7 +102,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.close`、`pane.wait_for_output` |
 | ポップアップ | `popup.close` |
 | レイアウト | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start`、`agent.view.set`、`agent.view.clear`、`agent.provider.replace`、`agent.provider.clear`、`agent.provider.get`、`agent.provider.snapshot`、`agent.provider.focus`、`agent.provider.focused` |
+| エージェント | `agent.list`、`agent.get`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
 | イベント | `events.subscribe`、`events.wait` |
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
@@ -145,9 +145,9 @@ CLI の `herdr api snapshot` は、クライアントやエージェントが簡
 
 クライアントは `offset_from_bottom == 0` を最下部にいる状態として扱えます。
 
-### 実験的なペイングラフィックス
+### ペイングラフィックス
 
-ペイングラフィックスを使うと、プラグインがペイン上に画像データを配置できます。`[experimental].kitty_graphics = true` の場合にのみ利用でき、それ以外ではすべてのペイングラフィックスメソッドが `feature_disabled` を返します。`pane.graphics.info` はグラフィックスレイヤーを作成せず、接続中クライアントのセルの幅と高さをピクセル単位で返します。`pane.graphics.set` は `data_base64` の `png`、`rgb`、`rgba` データを受け取り、`pane.graphics.clear` はレイヤーを削除します。
+ペイングラフィックスを使うと、プラグインがペイン上に画像データを配置できます。デフォルトで利用でき、サーバーで `[terminal].kitty_graphics = false` が設定されている場合は、すべてのペイングラフィックスメソッドが `feature_disabled` を返します。この設定の変更にはサーバーの再起動が必要です。`pane.graphics.info` はグラフィックスレイヤーを作成せず、接続中クライアントのセルの幅と高さをピクセル単位で返します。`pane.graphics.set` は `data_base64` の `png`、`rgb`、`rgba` データを受け取り、`pane.graphics.clear` はレイヤーを削除します。
 
 ```json
 {"id":"graphics_info","method":"pane.graphics.info","params":{"pane_id":"w1:p1"}}
@@ -374,44 +374,6 @@ uninstall されるか、サーバーが終了するまで有効です。永続�
 
 source が一致しない場合、アクティブなビューは変わりません。set と clear のレスポンスは
 `type: "agent_view"` で、`active`、`source`、任意の `label` を報告します。
-
-## データのみのエージェントプロバイダー
-
-エージェントプロバイダーを使うと、リモートまたは仮想エージェントを、各エージェント用の
-ローカルワークスペース、ペイン、PTY を作らずに組み込みの Agents ビューへ追加できます。
-プロバイダーのレコードには、ローカルエージェントと同じ status、メタデータトークン、
-フィルター、並び順、オーケストレーションカードが適用されます。`agent.list` は物理的な
-ローカルエージェントだけを返すため、別のプロバイダーの投影を再取り込みしません。
-
-`agent.provider.replace` は、一つの source の完全なスナップショットをアトミックに
-置き換えます。revision は 1 から始め、単調に増加させます。viewer には存在する
-ローカルペインを指定します。一つの source に登録できるレコードは最大 2,000 件です。
-各レコードでは state label を 8 個、メタデータトークンを 32 個まで指定できます。
-メタデータキーは 32 文字以内の ASCII 英数字、アンダースコア、ハイフンに限られ、値は
-256 文字以内です:
-
-```json
-{"id":"provider_replace","method":"agent.provider.replace","params":{"source":"fleet:default","revision":12,"viewer":{"workspace_id":"w1","pane_id":"w1:p1"},"agents":[{"id":"linux/reviewer","name":"linux · reviewer","agent":"codex","agent_status":"working","tokens":{"orchestration_id":"backlog:default","repository":"example","responsibility":"Review issue 302"}}]}}
-```
-
-`agent.provider.get` は一つの source/id レコードを返し、
-`agent.provider.snapshot` は source 全体のスナップショットを返します。source を消去する
-場合は、より大きい tombstone revision を送信します。消去後もスナップショットは取得でき、
-revision を保持したまま viewer を省略し、空の `agents` リストを返します:
-
-```json
-{"id":"provider_get","method":"agent.provider.get","params":{"source":"fleet:default","id":"linux/reviewer"}}
-{"id":"provider_snapshot","method":"agent.provider.snapshot","params":{"source":"fleet:default"}}
-{"id":"provider_clear","method":"agent.provider.clear","params":{"source":"fleet:default","revision":13}}
-```
-
-`agent.provider.focus` は source で共有する viewer ペインをフォーカスし、サイドバーでは
-選択したプロバイダーの識別子を維持します。`agent.provider.focused` はその識別子を返します。
-選択変更に合わせて viewer を切り替えるには `agent.provider_focused` を購読します。viewer が
-フォーカスを失うか、選択中のレコードが消えると、イベントの `target` は `null` になります。
-
-プロバイダーのスナップショットは一時的な状態です。サーバーをコールドスタートした後は
-再登録してください。`ping` レスポンスの `capabilities.agent_provider` が対応状況を示します。
 
 ## プラグイン API
 
@@ -787,6 +749,6 @@ herdr agent wait w1:p1 --until blocked
 
 ## プロトコルの安定性
 
-Herdr にはクライアント/サーバー互換性のためのプロトコルバージョンがあります。プロトコルの変更は、リリースの互換性を念頭にレビューされます。
+クライアント描画の Herdr UI は、ローカルサーバーと SSH サーバーに安定したエンドポイント世代を使います。クライアントとサーバーのビルドが一致する必要はありません。接続時にコアのスナップショット、画面、入力、blob コーデックを合意し、サーバーが対応 API メソッドと任意の能力を通知します。保存済み SSH マシンには、選択中のマシンだけがペイン画面を送信するための `surface_interest` と、通信のない接続の障害を検知する `health_check` が必要です。未対応のサーバーは明示的に更新するまで Attention になります。詳しくは[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。メソッドがない場合は、そのサーバー上の該当アクションだけを無効にしてクライアント側通知を表示します。拒否やタイムアウトも接続を終了せず通知します。エンドポイント世代 1 より前のサーバーだけは最後の 1 回の更新が必要です。
 
-新しい挙動に依存する前に、`ping` または `herdr status` でサーバーのプロトコルを確認してください。未知のフィールドは寛容に扱ってください。
+番号付きバイナリプロトコルは、直接ターミナル接続やライブハンドオフなど、同一インストール内の内部操作に残ります。異なるビルド間でそれらを使う前に `ping` または `herdr status` を確認してください。JSON API クライアントは未知のフィールドを無視し、未対応メソッドを通常のエラーとして扱う必要があります。

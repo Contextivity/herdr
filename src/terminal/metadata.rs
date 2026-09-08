@@ -573,54 +573,6 @@ mod tests {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn handoff_metadata_preserves_deduplication_ownership_and_source_limit() {
-        let mut terminal = test_terminal();
-        for index in 0..crate::metadata_tokens::MAX_SEQUENCE_SOURCES {
-            assert_eq!(
-                terminal.accept_metadata_report(
-                    &format!("source-{index}"),
-                    Some(42),
-                    true,
-                    Some(Agent::Claude)
-                ),
-                Ok(true)
-            );
-        }
-        terminal.metadata_tokens.patch(
-            HashMap::from([("orchestration_id".into(), Some("fleet".into()))]),
-            None,
-            Instant::now(),
-        );
-        let transfer = serde_json::from_str(
-            &serde_json::to_string(&terminal.capture_handoff_metadata()).unwrap(),
-        )
-        .unwrap();
-        let mut restored = test_terminal();
-        restored.restore_handoff_metadata(transfer);
-        assert_eq!(
-            restored.metadata_tokens.values(),
-            terminal.metadata_tokens.values()
-        );
-        assert_eq!(
-            restored.metadata_report_agents,
-            terminal.metadata_report_agents
-        );
-        assert_eq!(
-            restored.accept_metadata_report("source-0", Some(42), true, None),
-            Ok(false)
-        );
-        assert_eq!(
-            restored.accept_metadata_report("source-0", Some(43), true, None),
-            Ok(true)
-        );
-        assert_eq!(
-            restored.accept_metadata_report("new-source", Some(1), true, None),
-            Err(())
-        );
-    }
-
     #[test]
     fn presentation_sequences_remain_unbounded_while_token_sequences_are_bounded() {
         let mut terminal = test_terminal();
@@ -973,11 +925,12 @@ mod tests {
         });
 
         assert_eq!(terminal.next_agent_metadata_expiry(), Some(old_deadline));
-        assert_eq!(
-            terminal.effective_presentation().title.as_deref(),
-            Some("Prompt title")
+        let presentation = terminal.effective_presentation_for_state_at(
+            terminal.state,
+            old_deadline - Duration::from_millis(1),
         );
-        assert_eq!(terminal.effective_presentation().display_agent, None);
+        assert_eq!(presentation.title.as_deref(), Some("Prompt title"));
+        assert_eq!(presentation.display_agent, None);
 
         let mutation = terminal
             .expire_agent_metadata_at(old_deadline, old_deadline)

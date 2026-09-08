@@ -7,6 +7,9 @@ use crate::app::App;
 use crate::platform::StartupScript;
 use crate::terminal::TerminalId;
 
+#[cfg(unix)]
+use serde::{Deserialize, Serialize};
+
 pub(in crate::app) struct StartupTicket {
     receipt: StartupReceipt,
     terminal_id: TerminalId,
@@ -17,11 +20,32 @@ pub(in crate::app) struct StartupTicket {
     cleanup_completed: bool,
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HandoffStartupScript {
+    pub(crate) directory: String,
+    pub(crate) source_command: String,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HandoffStartupTicket {
+    pub(crate) receipt: StartupReceipt,
+    pub(crate) terminal_id: TerminalId,
+    pub(crate) start: AgentStartParams,
+    #[serde(default)]
+    pub(crate) script: Option<HandoffStartupScript>,
+    pub(crate) submitted: bool,
+    #[serde(default)]
+    pub(crate) closed_at_elapsed_ms: Option<u64>,
+    pub(crate) cleanup_completed: bool,
+}
+
 impl App {
-    /// Startup tickets are issuing-daemon authority, not reconstructed from a
-    /// wrapper's receipt. Until their transfer is supported, keep that daemon
-    /// alive while any unexpired ticket still needs reconciliation or cleanup.
+    /// Reports whether this daemon still has an uncleaned startup ticket. The
+    /// handoff path transfers these tickets before replacement ownership begins.
     #[cfg(unix)]
+    #[allow(dead_code)]
     pub(crate) fn has_handoff_startup_hold(&self) -> bool {
         self.startup_tickets.values().any(|ticket| {
             !ticket.cleanup_completed
@@ -29,6 +53,76 @@ impl App {
                     .closed_at
                     .is_none_or(|closed| closed.elapsed() < std::time::Duration::from_secs(86_400))
         })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn capture_handoff_startup_tickets(&self) -> Vec<HandoffStartupTicket> {
+        self.startup_tickets
+            .values()
+            .map(|ticket| {
+                let script = ticket.script.as_ref().map(|script| HandoffStartupScript {
+                    directory: ticket.receipt.ticket.clone(),
+                    source_command: script.source_command.clone(),
+                });
+                HandoffStartupTicket {
+                    receipt: ticket.receipt.clone(),
+                    terminal_id: ticket.terminal_id.clone(),
+                    start: ticket.start.clone(),
+                    script,
+                    submitted: ticket.submitted,
+                    closed_at_elapsed_ms: ticket
+                        .closed_at
+                        .and_then(|closed| u64::try_from(closed.elapsed().as_millis()).ok()),
+                    cleanup_completed: ticket.cleanup_completed,
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn restore_handoff_startup_tickets(&mut self, tickets: Vec<HandoffStartupTicket>) {
+        let now = std::time::Instant::now();
+        for ticket in tickets {
+            let closed_at = ticket
+                .closed_at_elapsed_ms
+                .and_then(|millis| now.checked_sub(std::time::Duration::from_millis(millis)));
+            let script = ticket.script.map(|script| {
+                crate::platform::StartupScript::from_handoff(
+                    std::path::PathBuf::from(script.directory),
+                    script.source_command,
+                )
+            });
+            self.startup_tickets.insert(
+                ticket.receipt.ticket.clone(),
+                StartupTicket {
+                    receipt: ticket.receipt,
+                    terminal_id: ticket.terminal_id,
+                    start: ticket.start,
+                    script,
+                    submitted: ticket.submitted,
+                    closed_at,
+                    cleanup_completed: ticket.cleanup_completed,
+                },
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn assume_handoff_startup_ownership(&mut self) {
+        for ticket in self.startup_tickets.values_mut() {
+            if let Some(script) = ticket.script.as_mut() {
+                script.assume_handoff_ownership();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn relinquish_handoff_startup_tickets(&mut self) {
+        for ticket in self.startup_tickets.values_mut() {
+            if let Some(script) = ticket.script.as_mut() {
+                script.relinquish_handoff_ownership();
+            }
+        }
     }
 
     pub(in crate::app) fn retire_startup_files(&mut self, terminal_id: &TerminalId) {
@@ -245,9 +339,23 @@ impl App {
         let Some(command) = crate::platform::interactive_shell_command(&argv, &shell) else {
             return invalid();
         };
-        let script = match StartupScript::create(&shell, &command, &preparation) {
-            Ok(script) => script,
-            Err(err) => return encode_error(id, "startup_script_failed", err.to_string()),
+        let script = if preparation.is_empty() {
+            match StartupScript::for_interactive(&shell, &command) {
+                Ok(Some(script)) => script,
+                Ok(None) => {
+                    return encode_error(
+                        id,
+                        "startup_script_failed",
+                        "script-backed startup requires a POSIX-compatible shell",
+                    )
+                }
+                Err(err) => return encode_error(id, "startup_script_failed", err.to_string()),
+            }
+        } else {
+            match StartupScript::create(&shell, &command, &preparation) {
+                Ok(script) => script,
+                Err(err) => return encode_error(id, "startup_script_failed", err.to_string()),
+            }
         };
         if observed_shell_lifetime(pid).as_deref() != Some(&lifetime) {
             return encode_error(
@@ -529,7 +637,7 @@ mod tests {
         let (_, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut fixture = Fixture(App::new(
             &crate::config::Config::default(),
-            true,
+            crate::app::AppPolicy::TEST,
             None,
             rx,
             crate::api::EventHub::default(),
@@ -541,6 +649,7 @@ mod tests {
             let response = app.handle_api_request(Request {
                 id: label.into(),
                 method: Method::WorkspaceCreate(WorkspaceCreateParams {
+                    source_workspace_id: None,
                     cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
                     focus: false,
                     label: Some(label.into()),
