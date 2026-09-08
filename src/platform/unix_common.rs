@@ -1,3 +1,22 @@
+/// Read a same-boot OS clock without converting errors into permanent tokens.
+/// Handoff is Unix-socket local and cannot import deadlines from another boot.
+pub(super) fn handoff_monotonic_time(clock: libc::clockid_t) -> Option<std::time::Duration> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: value is a valid writable timespec; no pointer is retained.
+    if unsafe { libc::clock_gettime(clock, &mut value) } != 0
+        || !(0..1_000_000_000).contains(&value.tv_nsec)
+    {
+        return None;
+    }
+    Some(std::time::Duration::new(
+        value.tv_sec.try_into().ok()?,
+        value.tv_nsec.try_into().ok()?,
+    ))
+}
+
 use std::path::{Path, PathBuf};
 
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
