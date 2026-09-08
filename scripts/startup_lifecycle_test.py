@@ -18,6 +18,9 @@ with tempfile.TemporaryDirectory(prefix='herdr-ticket-') as tmp:
         HERDR_SOCKET_PATH=str(root/'server.sock'),HERDR_CLIENT_SOCKET_PATH=str(root/'client.sock'),
         HERDR_CONFIG_PATH=str(root/'config.toml'),ZDOTDIR=str(root),TMPDIR=str(root),SHELL=shutil.which('zsh'))
     (root/'config.toml').write_text('[terminal]\ndefault_shell = "'+shutil.which('zsh')+'"\n[update]\nversion_check = false\n')
+    # Ubuntu CI's system zshrc can pause at compinit's permissions question.
+    # Keep this disposable fixture's own startup files, skip system rc files.
+    (root/'.zshenv').write_text('unsetopt GLOBAL_RCS\n')
     (root/'record.py').write_text('import os,sys,json\nwith open(os.environ["TEST_RESULT"],"a") as f: f.write(json.dumps(dict(argv=sys.argv[1:], preparation=os.environ.get("PREPARED")))+"\\n")\n')
     (root/'.zshrc').write_text('zmodload zsh/datetime\nif [[ -n "$TEST_MARKER" ]]; then\n print begin > "$TEST_MARKER"\n launch_begin=$EPOCHREALTIME\n while (( EPOCHREALTIME - launch_begin < ${TEST_DELAY:-2} )); do :; done\n print ready >> "$TEST_MARKER"\nfi\nPS1="READY> "\ncodex() { python3 '+str(root/'record.py')+' "$@"; }\nprint ready > '+str(root)+'/ready-$$\n')
     def api(method,params):
