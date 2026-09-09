@@ -35,6 +35,11 @@ impl ClientShellState {
         } else {
             Rect::new(0, 1, cols, rows.saturating_sub(2))
         };
+        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self
+                .navigate_workspace_id
+                .as_ref()
+                .is_some_and(|target| self.navigation_target_valid(target));
         super::endpoint_sidebar::render_expanded(
             &mut buffer,
             sidebar,
@@ -45,6 +50,7 @@ impl ClientShellState {
                 active_endpoint_id: &self.active_endpoint_id,
                 collapsed_endpoints: &self.collapsed_endpoints,
                 collapsed_groups: &self.collapsed_groups,
+                remote_collapsed_groups: &self.remote_collapsed_groups,
                 workspace_scroll: &mut self.workspace_scroll,
                 agent_scroll: &mut self.agent_scroll,
                 tab_scroll: &mut self.tab_scroll,
@@ -53,7 +59,11 @@ impl ClientShellState {
                 sidebar_collapsed: false,
                 sidebar_section_split: self.sidebar_section_split,
                 tab_drag_insert_index: None,
-                selected_workspace_id: self.navigate_workspace_id.as_deref(),
+                selected_workspace_id: self
+                    .navigate_workspace_id
+                    .as_ref()
+                    .filter(|_| valid_navigation_target),
+                reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id: None,
                 workspace_drop_indicator_row: None,
             },
@@ -99,7 +109,16 @@ impl ClientShellState {
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
+        if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
+            self.reveal_navigation_workspace = true;
+            self.reveal_mobile_workspace = true;
+        }
         self.last_composed_size = Some((cols, rows));
+        let valid_navigation_target = self.mode == ClientShellMode::Navigate
+            && self
+                .navigate_workspace_id
+                .as_ref()
+                .is_some_and(|target| self.navigation_target_valid(target));
         if self.snapshot.is_none() || self.pane_surface.is_none() {
             return Some(self.compose_unavailable(cols, rows));
         }
@@ -143,6 +162,7 @@ impl ClientShellState {
                 active_endpoint_id: &self.active_endpoint_id,
                 collapsed_endpoints: &self.collapsed_endpoints,
                 collapsed_groups: &self.collapsed_groups,
+                remote_collapsed_groups: &self.remote_collapsed_groups,
                 workspace_scroll: &mut self.workspace_scroll,
                 agent_scroll: &mut self.agent_scroll,
                 tab_scroll: &mut self.tab_scroll,
@@ -151,9 +171,11 @@ impl ClientShellState {
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
                 tab_drag_insert_index,
-                selected_workspace_id: (self.mode == ClientShellMode::Navigate)
-                    .then_some(self.navigate_workspace_id.as_deref())
-                    .flatten(),
+                selected_workspace_id: self
+                    .navigate_workspace_id
+                    .as_ref()
+                    .filter(|_| valid_navigation_target),
+                reveal_navigation_workspace: &mut self.reveal_navigation_workspace,
                 dragged_workspace_id,
                 workspace_drop_indicator_row,
             },
@@ -509,7 +531,9 @@ impl ClientShellState {
                 &self.endpoints,
                 &self.active_endpoint_id,
                 &self.config,
-                self.navigate_workspace_id.as_deref(),
+                self.navigate_workspace_id
+                    .as_ref()
+                    .filter(|_| valid_navigation_target),
                 &mut self.mobile_switcher_scroll,
                 &mut self.reveal_mobile_workspace,
                 &mut self.hits,
