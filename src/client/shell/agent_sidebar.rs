@@ -436,7 +436,7 @@ fn sidebar_status_text(status: crate::api::schema::AgentStatus) -> &'static str 
     }
 }
 
-fn orchestration_token<'a>(
+pub(super) fn orchestration_token<'a>(
     agent: &'a crate::protocol::ClientShellAgent,
     key: &str,
 ) -> Option<&'a str> {

@@ -117,11 +117,35 @@ fn agent_rows(
         .flatten()
         .collect::<HashMap<_, _>>();
 
-    super::aggregate_navigation::aggregate_agent_rows(endpoints, config.agent_panel_sort)
-        .into_iter()
+    let rows =
+        super::aggregate_navigation::aggregate_agent_rows(endpoints, config.agent_panel_sort);
+    let grouped = config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces;
+    let mut counts = HashMap::new();
+    if grouped {
+        for row in &rows {
+            let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
+            if rendered_rows.contains_key(&key) {
+                if let Some(id) = super::aggregate_navigation::orchestration_group(row) {
+                    *counts.entry(id).or_insert(0usize) += 1;
+                }
+            }
+        }
+    }
+    let mut previous_group = None;
+    rows.into_iter()
         .filter_map(|row| {
             let key = (row.endpoint.endpoint_id.clone(), row.agent.pane_id.clone());
             let mut agent = rendered_rows.remove(&key)?;
+            let group = grouped
+                .then(|| super::aggregate_navigation::orchestration_group(&row))
+                .flatten();
+            agent.group_header = group.filter(|id| Some(*id) != previous_group).map(|id| {
+                let label =
+                    super::agent_sidebar::orchestration_token(row.agent, "orchestration_label")
+                        .unwrap_or(id);
+                format!("{label} · {}", counts.get(id).copied().unwrap_or_default())
+            });
+            previous_group = group;
             agent.focused &= row.endpoint.endpoint_id == active_endpoint_id;
             Some(EndpointAgentRow {
                 endpoint_id: row.endpoint.endpoint_id.clone(),

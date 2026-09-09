@@ -46,6 +46,14 @@ pub(super) struct AggregateAgentTarget {
     pub(super) pane_id: String,
 }
 
+// Explicit saved views own their order and do not acquire orchestration headers.
+pub(super) fn orchestration_group<'a>(row: &AggregateAgentRow<'a>) -> Option<&'a str> {
+    if row.endpoint.snapshot.agent_view_label.is_some() {
+        return None;
+    }
+    super::agent_sidebar::orchestration_token(row.agent, "orchestration_id")
+}
+
 pub(super) fn aggregate_agent_rows(
     endpoints: &[ClientShellEndpoint],
     sort: crate::config::AgentPanelSortConfig,
@@ -80,6 +88,23 @@ pub(super) fn aggregate_agent_rows(
                 std::cmp::Reverse(row.recency),
             )
         });
+    }
+    if sort == crate::config::AgentPanelSortConfig::Spaces {
+        // Rank globally by durable ID, never by display label or pane ID.
+        // Stable sorting preserves host-qualified action identity within a group.
+        let mut groups = HashMap::new();
+        let ranks = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                orchestration_group(row)
+                    .map(|id| *groups.entry(id).or_insert(index))
+                    .unwrap_or(index)
+            })
+            .collect::<Vec<_>>();
+        let mut ranked = ranks.into_iter().zip(rows).collect::<Vec<_>>();
+        ranked.sort_by_key(|(rank, _)| *rank);
+        rows = ranked.into_iter().map(|(_, row)| row).collect();
     }
     rows
 }

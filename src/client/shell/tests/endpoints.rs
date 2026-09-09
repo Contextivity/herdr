@@ -1233,10 +1233,10 @@ fn orchestration_groups_preserve_endpoint_identity_and_navigation_order() {
             .iter()
             .map(|target| target.pane_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["a1", "a2", "b1", "a1"]
+        vec!["a1", "a2", "a1", "b1"]
     );
     assert_eq!(targets[0].endpoint_id, ClientEndpointId::Local);
-    assert_eq!(targets[3].endpoint_id, remote_id);
+    assert_eq!(targets[2].endpoint_id, remote_id);
 
     let frame = state.compose(140, 60).unwrap();
     let text = frame
@@ -1249,8 +1249,9 @@ fn orchestration_groups_preserve_endpoint_identity_and_navigation_order() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Task A · 2"), "{text}");
-    assert!(text.contains("Task A · 1"), "{text}");
+    assert_eq!(text.matches("Task A · 3").count(), 1, "{text}");
+    assert!(!text.contains("Task A · 1"), "{text}");
+    assert!(!text.contains("Task A · 2"), "{text}");
     assert!(text.contains("Task B · 1"), "{text}");
     let hit_ids = state
         .hits
@@ -1265,6 +1266,67 @@ fn orchestration_groups_preserve_endpoint_identity_and_navigation_order() {
             .map(|target| (target.endpoint_id.clone(), target.pane_id.as_str()))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn cross_machine_groups_keep_distinct_ids_and_saved_views_separate() {
+    use crate::api::schema::AgentStatus;
+    use crate::config::AgentPanelSortConfig;
+    let (mut state, remote_id) = state_with_remote();
+    let mut worker = agent("local", AgentStatus::Idle, 1);
+    worker.tokens = vec![
+        ("orchestration_id".into(), "A".into()),
+        ("orchestration_label".into(), "Same label".into()),
+    ];
+    let mut local = snapshot();
+    local.agents = vec![worker.clone()];
+    state.set_snapshot(Box::new(local));
+    let mut remote = snapshot();
+    worker.name = Some("remote".into());
+    worker.tokens[0].1 = "B".into();
+    remote.agents = vec![worker];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote.clone()));
+    let frame_text = |state: &mut ClientShellState| {
+        let frame = state.compose(140, 60).unwrap();
+        frame
+            .cells
+            .chunks(frame.width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let text = frame_text(&mut state);
+    assert_eq!(text.matches("Same label · 1").count(), 2, "{text}");
+    assert!(!text.contains("Same label · 2"), "{text}");
+
+    // An explicit remote view must not become a member of the local group.
+    remote.agents[0].tokens[0].1 = "A".into();
+    remote.agent_view_label = Some("Selected workers".into());
+    remote.agent_order = vec!["pane_1".into()];
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+    let text = frame_text(&mut state);
+    assert_eq!(text.matches("Same label · 1").count(), 1, "{text}");
+    assert!(!text.contains("Same label · 2"), "{text}");
+    let targets = super::super::aggregate_navigation::online_agent_targets(
+        &state.endpoints,
+        AgentPanelSortConfig::Spaces,
+    );
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].endpoint_id, ClientEndpointId::Local);
+    assert_eq!(targets[1].endpoint_id, remote_id);
+
+    // Cached offline panes remain visible but must never become online targets.
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
+    let targets = super::super::aggregate_navigation::online_agent_targets(
+        &state.endpoints,
+        AgentPanelSortConfig::Spaces,
+    );
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].endpoint_id, ClientEndpointId::Local);
 }
 
 #[test]
@@ -1344,7 +1406,7 @@ fn orchestration_headers_disappear_with_removed_agents_and_are_not_pane_targets(
 fn orchestration_render_scale_profile() {
     use crate::api::schema::AgentStatus;
     for count in [1, 15, 500] {
-        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+        let (mut state, remote_id) = state_with_remote();
         let mut value = snapshot();
         value.agents = (0..count)
             .map(|index| {
@@ -1354,6 +1416,7 @@ fn orchestration_render_scale_profile() {
                 worker
             })
             .collect();
+        state.set_endpoint_snapshot(&remote_id, Box::new(value.clone()));
         state.set_snapshot(Box::new(value));
         state.set_pane_surface(surface());
         let started = std::time::Instant::now();
@@ -1361,7 +1424,7 @@ fn orchestration_render_scale_profile() {
             std::hint::black_box(state.compose(140, 60).unwrap());
         }
         eprintln!(
-            "grouped agents={count} geometry=140x60 mean_us={}",
+            "grouped agents_per_host={count} hosts=2 geometry=140x60 mean_us={}",
             started.elapsed().as_micros() / 100
         );
     }
