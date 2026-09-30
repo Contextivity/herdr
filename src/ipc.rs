@@ -1,8 +1,10 @@
 use std::fs;
 use std::io::{self, Read};
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
+
+pub(crate) mod public_endpoints;
 
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
@@ -22,7 +24,7 @@ pub(crate) enum LocalStreamReadCount {
     Closed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SocketFileIdentity {
     #[cfg(unix)]
     dev: u64,
@@ -280,6 +282,12 @@ fn windows_named_pipe_closed_error(err: &io::Error) -> bool {
 pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity> {
     #[cfg(windows)]
     {
+        if !fs::symlink_metadata(path)?.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "socket marker pathname is not a regular file",
+            ));
+        }
         Ok(SocketFileIdentity {
             marker: fs::read(path)?,
         })
@@ -287,7 +295,13 @@ pub(crate) fn socket_file_identity(path: &Path) -> io::Result<SocketFileIdentity
 
     #[cfg(unix)]
     {
-        let metadata = fs::metadata(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "socket pathname is not a socket",
+            ));
+        }
         Ok(SocketFileIdentity {
             dev: metadata.dev(),
             ino: metadata.ino(),

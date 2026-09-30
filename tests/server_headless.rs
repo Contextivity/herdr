@@ -278,17 +278,35 @@ fn server_cleans_up_stale_client_socket() {
     let api_socket = runtime_dir.join("herdr.sock");
     let client_socket = runtime_dir.join("herdr-client.sock");
 
-    // Create a stale client socket file (simulating a crashed server).
-    fs::create_dir_all(&runtime_dir).unwrap();
-    register_runtime_dir(&runtime_dir);
-    {
-        let _listener = std::os::unix::net::UnixListener::bind(&client_socket).unwrap();
-        // Drop the listener so the socket becomes stale.
+    // Produce ownership evidence at the real server boundary. A foreign Unix
+    // listener does not simulate a crashed Herdr owner and must stay held.
+    let mut previous = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+    let record = PathBuf::from(format!("{}.owner.json", client_socket.display()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !record.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "client generation was not published"
+        );
+        thread::sleep(Duration::from_millis(20));
     }
+    let old_pid = previous.child.process_id().unwrap();
+    assert_eq!(
+        unsafe { libc::kill(old_pid as libc::pid_t, libc::SIGKILL) },
+        0
+    );
+    previous.close_master();
+    previous.child.wait().unwrap();
+    drop(previous);
+    // Exercise the API-less cold pair: the owned client pathname remains.
+    fs::remove_file(&api_socket).unwrap();
+    assert!(UnixStream::connect(&client_socket).is_err());
 
-    // Now start the server — it should clean up the stale socket.
     let spawned = spawn_server(&config_home, &runtime_dir, &api_socket, &client_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
 
     // The API should work.
     let response = ping_socket(&api_socket);

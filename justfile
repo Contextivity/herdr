@@ -5,7 +5,7 @@ python := if os() == "windows" { "python" } else { "python3" }
 
 # Run tests
 test:
-    cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
+    {{python}} scripts/run_isolated_tests.py cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
@@ -14,11 +14,11 @@ test:
 
 # Run repository maintenance contract tests
 maintenance-test:
-    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_run_isolated_tests scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
-    cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
+    {{python}} scripts/run_isolated_tests.py cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
 ui-hot-path-architecture-test:
@@ -37,7 +37,7 @@ lint:
 
 # Run PR CI checks
 ci filter='all()': lint
-    cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    {{python}} scripts/run_isolated_tests.py cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
     just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test

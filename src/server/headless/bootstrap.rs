@@ -22,11 +22,17 @@ pub fn run_server() -> io::Result<()> {
     let event_hub = api::EventHub::default();
     let should_quit = Arc::new(AtomicBool::new(false));
 
+    // An API-less daemon may still own the client endpoint. Reject a duplicate
+    // before restoring any pane processes or briefly publishing a new API.
+    let admission = crate::ipc::public_endpoints::Admission::lock(&api::socket_path())?;
+    admission.prepare_pair(&api::socket_path(), &client_socket_path(), false)?;
+
     // Start the JSON API socket server.
     let _api_server = match api::start_server_with_stop_control(
         api_tx.clone(),
         event_hub.clone(),
         should_quit.clone(),
+        &admission,
     ) {
         Ok(server) => server,
         Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -60,6 +66,8 @@ pub fn run_server() -> io::Result<()> {
             Some(api_tx.clone()),
             Some(_api_server),
             should_quit,
+            &admission,
+            false,
         ) {
             Ok(server) => server,
             Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
@@ -75,6 +83,7 @@ pub fn run_server() -> io::Result<()> {
             client_socket = %client_socket_path().display(),
             "herdr server started"
         );
+        drop(admission);
         print_ready_message(&api::socket_path(), &client_socket_path());
         server.app.run_plugin_startup_hooks();
 
@@ -167,10 +176,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         }
         wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
 
-        let api_server = api::start_server_with_stop_control(
+        let admission = crate::ipc::public_endpoints::Admission::lock(&api::socket_path())?;
+        admission.prepare_pair(&api::socket_path(), &client_socket_path(), true)?;
+        let api_server = api::start_server_for_handoff(
             api_tx.clone(),
             event_hub.clone(),
             should_quit.clone(),
+            &admission,
         )?;
         let mut server = HeadlessServer::new(
             app,
@@ -178,10 +190,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             Some(api_tx.clone()),
             Some(api_server),
             should_quit,
+            &admission,
+            true,
         )?;
         // Carried across before any client attaches, so the first title sent is
         // the override rather than the configured one it replaced.
         server.api_window_title = received.manifest.api_window_title.take();
+        drop(admission);
         crate::server::handoff::report_ready(&mut received.stream)?;
         crate::server::handoff::wait_committed(&mut received.stream)?;
         server.app.assume_handoff_ownership();

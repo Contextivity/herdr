@@ -112,6 +112,12 @@ impl StartupScript {
             .is_some_and(|value| value.trim().parse::<u8>().is_ok())
     }
 
+    /// Keep original startup evidence after a daemon failure. Retaining the
+    /// files does not restore ticket authority or authorize submitting input.
+    pub(crate) fn retain_for_recovery(&mut self) {
+        self.owns_files = false;
+    }
+
     /// A source command is still queued if the launch file has not yet been
     /// unlinked by the shell. Once unlinked, the shell owns execution and the
     /// daemon may hand off without deleting the script mid-startup.

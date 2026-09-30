@@ -69,6 +69,16 @@ pub(crate) fn startup_process_lifetime(_pid: u32) -> Option<String> {
     None
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn public_endpoint_owner_exited(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn public_endpoint_boot_identity() -> Option<String> {
+    None
+}
+
 pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::CommandBuilder {
     pane_custom_command_pty_builder_platform(command)
 }

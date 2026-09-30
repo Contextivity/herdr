@@ -194,12 +194,30 @@ impl HeadlessServer {
             return Err(err);
         }
 
-        if let Some(api_server) = &self.api_server {
-            let _ = api_server.remove_socket_file_if_owned();
-        } else {
-            let _ = std::fs::remove_file(crate::api::socket_path());
+        let vacate = (|| {
+            let admission =
+                crate::ipc::public_endpoints::Admission::lock(&self.endpoint_admission_path)?;
+            let api_server = self
+                .api_server
+                .as_mut()
+                .ok_or_else(|| io::Error::other("handoff requires an owned api listener"))?;
+            api_server.remove_socket_file_if_owned(&admission)?;
+            let identity = self
+                .client_socket_identity
+                .take()
+                .ok_or_else(|| io::Error::other("handoff requires an owned client endpoint"))?;
+            admission.unlink_owned(&self.client_socket_path, &identity)
+        })();
+        if let Err(err) = vacate {
+            crate::server::handoff::cleanup_failed_import_child(&mut import_child);
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            // A partially vacated pair cannot remain an apparently healthy
+            // daemon. Normal shutdown saves state without guessing ownership.
+            self.should_quit.store(true, Ordering::Release);
+            return Err(err);
         }
-        let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
+        // The live old-owner records reserve the vacant names while the
+        // authenticated replacement binds. Never hold admission across waits.
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -270,23 +288,29 @@ impl HeadlessServer {
             .api_tx
             .clone()
             .ok_or_else(|| io::Error::other("cannot restore api socket without api sender"))?;
+        let admission =
+            crate::ipc::public_endpoints::Admission::lock(&self.endpoint_admission_path)?;
+        admission.prepare_pair(&api::socket_path(), &client_socket_path(), false)?;
         let api_server = api::start_server_with_stop_control(
             api_tx,
             self.app.event_hub.clone(),
             self.should_quit.clone(),
+            &admission,
         )?;
 
         let client_path = client_socket_path();
-        prepare_socket_path(&client_path)?;
-        let listener = bind_local_listener(&client_path)?;
-        restrict_socket_permissions(&client_path)?;
-        let client_socket_identity = socket_file_identity(&client_path)?;
-        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+        let (listener, client_socket_identity) = bind_client_socket(&admission, false)?;
+
+        // Drop the old handle after releasing admission. It has relinquished
+        // unlink authority; stopping its workers cannot stop the replacement.
+        let old_api = self.api_server.take();
 
         self.api_server = Some(api_server);
         self.client_listener = listener;
         self.client_socket_path = client_path;
-        self.client_socket_identity = client_socket_identity;
+        self.client_socket_identity = Some(client_socket_identity);
+        drop(admission);
+        drop(old_api);
         Ok(())
     }
 
@@ -385,15 +409,12 @@ impl HeadlessServer {
 
     /// Removes socket files created by the server.
     pub(super) fn cleanup_sockets(&self) -> io::Result<()> {
-        if let Err(err) =
-            remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity)
-        {
-            if err.kind() != io::ErrorKind::NotFound {
-                warn!(
-                    path = %self.client_socket_path.display(),
-                    err = %err,
-                    "failed to remove client socket on shutdown"
-                );
+        let admission =
+            crate::ipc::public_endpoints::Admission::try_lock(&self.endpoint_admission_path)?;
+        if let Some(identity) = &self.client_socket_identity {
+            if let Err(err) = admission.cleanup(&self.client_socket_path, identity) {
+                warn!(path = %self.client_socket_path.display(), err = %err,
+                    "failed to remove client endpoint on shutdown");
             }
         }
         Ok(())

@@ -284,6 +284,29 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+/// Private endpoint evidence must not follow a substituted symlink.
+pub(crate) fn private_endpoint_options() -> std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    options
+}
+
+pub(crate) fn validate_private_endpoint_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        return Err(std::io::Error::other(
+            "endpoint evidence must be private to this user",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

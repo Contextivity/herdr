@@ -19,10 +19,11 @@ use super::{
 
 pub(crate) use super::unix_common::{
     configure_status_command, create_remote_private_dir, create_remote_ssh_config_dir,
-    create_remote_ssh_config_file, hostname, local_datetime, remote_bridge_endpoint_path,
-    remote_private_temp_base, remote_reattach_argument, remote_reattach_program,
-    remote_ssh_config_paths, set_default_plugin_pane_pwd, status_commands_supported,
-    wait_client_stream_readable, StatusCommandGuard,
+    create_remote_ssh_config_file, hostname, local_datetime, private_endpoint_options,
+    remote_bridge_endpoint_path, remote_private_temp_base, remote_reattach_argument,
+    remote_reattach_program, remote_ssh_config_paths, set_default_plugin_pane_pwd,
+    status_commands_supported, validate_private_endpoint_file, wait_client_stream_readable,
+    StatusCommandGuard,
 };
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
@@ -452,6 +453,18 @@ pub fn process_exists(pid: u32) -> bool {
     } else {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
+}
+
+/// Only ESRCH proves absence; permission and inspection errors hold ownership.
+pub(crate) fn public_endpoint_owner_exited(pid: u32) -> bool {
+    (unsafe { libc::kill(pid as i32, 0) }) == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+pub(crate) fn public_endpoint_boot_identity() -> Option<String> {
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let boot = boot.trim();
+    (!boot.is_empty()).then(|| boot.to_owned())
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {

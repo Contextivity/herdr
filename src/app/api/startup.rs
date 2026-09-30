@@ -42,6 +42,16 @@ pub(crate) struct HandoffStartupTicket {
 }
 
 impl App {
+    pub(crate) fn retain_startup_artifacts_on_failure(&mut self) {
+        for ticket in self.startup_tickets.values_mut() {
+            if let Some(script) = &mut ticket.script {
+                script.retain_for_recovery();
+                tracing::warn!(event = "agent.startup.artifact_retained", ticket = %ticket.receipt.ticket,
+                    "retaining original startup artifact after server failure; ticket authority ends with this daemon");
+            }
+        }
+    }
+
     /// Reports whether this daemon still has an uncleaned startup ticket. The
     /// handoff path transfers these tickets before replacement ownership begins.
     #[cfg(unix)]

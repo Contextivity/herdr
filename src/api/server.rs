@@ -18,11 +18,14 @@ use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_ou
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
     bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
-    poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
-    socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
+    poll_local_stream_read, set_local_stream_polling, socket_file_identity, LocalStream,
+    LocalStreamRead, SocketFileIdentity,
 };
 
+mod listener;
 mod pane_graphics_stream;
+
+pub use listener::ServerHandle;
 
 const SOCKET_PERMISSION_MODE: u32 = 0o600;
 pub(super) const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -31,37 +34,38 @@ const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 
-pub struct ServerHandle {
-    _thread: std::thread::JoinHandle<()>,
-    path: PathBuf,
-    identity: SocketFileIdentity,
-    running: Arc<AtomicBool>,
-}
-
-impl Drop for ServerHandle {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-
-        if let Err(err) = self.remove_socket_file_if_owned() {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %self.path.display(), err = %err, "failed to remove api socket on shutdown");
-            }
-        }
-    }
-}
-
-impl ServerHandle {
-    pub(crate) fn remove_socket_file_if_owned(&self) -> std::io::Result<()> {
-        remove_socket_file_if_owned(&self.path, &self.identity)
-    }
-}
-
 pub(crate) fn start_server_with_stop_control(
     api_tx: ApiRequestSender,
     event_hub: EventHub,
     server_stop: Arc<AtomicBool>,
+    admission: &crate::ipc::public_endpoints::Admission,
 ) -> std::io::Result<ServerHandle> {
-    start_server_inner(api_tx, event_hub, default_capabilities(), Some(server_stop))
+    start_server_inner(
+        api_tx,
+        event_hub,
+        default_capabilities(),
+        Some(server_stop),
+        admission,
+        false,
+    )
+}
+
+/// Called only after the private handoff has authenticated the replacement.
+#[cfg(unix)]
+pub(crate) fn start_server_for_handoff(
+    api_tx: ApiRequestSender,
+    event_hub: EventHub,
+    server_stop: Arc<AtomicBool>,
+    admission: &crate::ipc::public_endpoints::Admission,
+) -> io::Result<ServerHandle> {
+    start_server_inner(
+        api_tx,
+        event_hub,
+        default_capabilities(),
+        Some(server_stop),
+        admission,
+        true,
+    )
 }
 
 fn default_capabilities() -> Option<ServerCapabilities> {
@@ -79,63 +83,20 @@ fn start_server_inner(
     event_hub: EventHub,
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<Arc<AtomicBool>>,
+    admission: &crate::ipc::public_endpoints::Admission,
+    handoff_import: bool,
 ) -> std::io::Result<ServerHandle> {
     let path = socket_path();
-    prepare_socket_path(&path)?;
+    admission.prepare(&path, handoff_import)?;
 
-    let listener = bind_local_listener(&path)?;
-    restrict_socket_permissions(&path)?;
-    let identity = socket_file_identity(&path)?;
-    info!(path = %path.display(), "api server listening");
-
-    let running = Arc::new(AtomicBool::new(true));
-    let listener_running = Arc::clone(&running);
-    let thread = std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let api_tx = api_tx.clone();
-                    let event_hub = event_hub.clone();
-                    let capabilities = capabilities.clone();
-                    let server_stop = server_stop.clone();
-                    let connection_running = Arc::clone(&listener_running);
-                    std::thread::spawn(move || {
-                        if let Err(err) = handle_connection_with_stop(
-                            stream,
-                            &api_tx,
-                            &event_hub,
-                            &connection_running,
-                            capabilities,
-                            server_stop.as_ref(),
-                        ) {
-                            warn!(err = %err, "api connection failed");
-                        }
-                    });
-                }
-                Err(err) => {
-                    error!(err = %err, "api listener accept failed");
-                    break;
-                }
-            }
-        }
-        debug!("api server thread exiting");
-    });
-
-    Ok(ServerHandle {
-        _thread: thread,
+    listener::start_on_path(
         path,
-        identity,
-        running,
-    })
-}
-
-fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
-    crate::ipc::prepare_socket_path(path, |path| {
-        format!(
-            "herdr is already running (socket busy at {})",
-            path.display()
-        )
-    })
+        api_tx,
+        event_hub,
+        capabilities,
+        server_stop,
+        admission,
+    )
 }
 
 fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {

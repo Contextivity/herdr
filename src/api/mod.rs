@@ -7,6 +7,8 @@ mod subscriptions;
 mod wait;
 
 pub use event_hub::EventHub;
+#[cfg(unix)]
+pub(crate) use server::start_server_for_handoff;
 pub use server::ServerHandle;
 pub(crate) use server::{api_method_name, start_server_with_stop_control};
 pub use status::{read_runtime_status_at, RuntimeStatus};

@@ -28,9 +28,7 @@ use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
-#[cfg(windows)]
-use tracing::error;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use base64::Engine;
 use bytes::Bytes;
@@ -39,10 +37,7 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
-use crate::ipc::{
-    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
-    SocketFileIdentity,
-};
+use crate::ipc::{bind_local_listener, socket_file_identity, LocalListener, SocketFileIdentity};
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
 };
@@ -66,9 +61,7 @@ use crate::server::pane_input::{
     apply_client_pane_input_events, apply_client_popup_input_events, apply_terminal_attach_input,
     apply_terminal_attach_scroll, terminal_attach_mouse_position,
 };
-use crate::server::socket_paths::{
-    client_socket_path, prepare_socket_path, restrict_socket_permissions,
-};
+use crate::server::socket_paths::{client_socket_path, restrict_socket_permissions};
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
 mod bootstrap;
@@ -202,7 +195,8 @@ pub struct HeadlessServer {
     #[cfg(unix)]
     client_listener: LocalListener,
     client_socket_path: PathBuf,
-    client_socket_identity: SocketFileIdentity,
+    client_socket_identity: Option<SocketFileIdentity>,
+    endpoint_admission_path: PathBuf,
     clients: HashMap<u64, ClientConnection>,
     #[cfg(unix)]
     next_client_id: u64,
@@ -301,6 +295,22 @@ fn spawn_windows_client_accept_thread(
     });
 }
 
+/// Binding and publication share the pair admission held by the caller.
+fn bind_client_socket(
+    admission: &crate::ipc::public_endpoints::Admission,
+    handoff_import: bool,
+) -> io::Result<(LocalListener, SocketFileIdentity)> {
+    let path = client_socket_path();
+    admission.prepare(&path, handoff_import)?;
+    let listener = bind_local_listener(&path)?;
+    restrict_socket_permissions(&path)?;
+    let identity = socket_file_identity(&path)?;
+    #[cfg(unix)]
+    listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
+    admission.publish(&path, &identity)?;
+    Ok((listener, identity))
+}
+
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -314,18 +324,12 @@ impl HeadlessServer {
         api_tx: Option<api::ApiRequestSender>,
         api_server: Option<api::ServerHandle>,
         should_quit: Arc<AtomicBool>,
+        admission: &crate::ipc::public_endpoints::Admission,
+        handoff_import: bool,
     ) -> io::Result<Self> {
         let client_path = client_socket_path();
-        prepare_socket_path(&client_path)?;
-
-        let listener = bind_local_listener(&client_path)?;
-        restrict_socket_permissions(&client_path)?;
-        let client_socket_identity = socket_file_identity(&client_path)?;
+        let (listener, client_socket_identity) = bind_client_socket(admission, handoff_import)?;
         info!(path = %client_path.display(), "client protocol socket listening");
-
-        // Set non-blocking on Unix so we can poll it from the event loop.
-        #[cfg(unix)]
-        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
@@ -346,7 +350,8 @@ impl HeadlessServer {
             #[cfg(unix)]
             client_listener: listener,
             client_socket_path: client_path,
-            client_socket_identity,
+            client_socket_identity: Some(client_socket_identity),
+            endpoint_admission_path: api::socket_path(),
             clients: HashMap::new(),
             #[cfg(unix)]
             next_client_id: 1,
@@ -402,6 +407,7 @@ impl HeadlessServer {
         let mut needs_render = true;
         let mut needs_full_render = true;
         let mut needs_graphics_render = false;
+        let mut api_failure = None;
 
         loop {
             crate::render_prof::event("loop.tick");
@@ -421,6 +427,20 @@ impl HeadlessServer {
                 );
                 self.initiate_shutdown();
                 continue;
+            }
+
+            // API listener lifetime is independent of the PTYs. Repair only
+            // outside handoff, which intentionally transfers socket ownership.
+            if !self.handoff_in_progress {
+                if let Some(api_server) = &mut self.api_server {
+                    if let Err(err) = api_server.recover_if_finished() {
+                        error!(event = "api.listener.recovery_failed", err = %err, "api listener recovery failed; shutting down server");
+                        api_failure = Some(err);
+                        self.app.retain_startup_artifacts_on_failure();
+                        self.initiate_shutdown();
+                        continue;
+                    }
+                }
             }
 
             // 1. Check the coalesced render signal from PTY readers and generic runtime work.
@@ -725,7 +745,7 @@ impl HeadlessServer {
         }
 
         info!("headless server exiting");
-        Ok(())
+        api_failure.map_or(Ok(()), Err)
     }
 
     fn allocate_activity_stamp(&mut self) -> u64 {

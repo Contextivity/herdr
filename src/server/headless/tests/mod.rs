@@ -47,6 +47,10 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
     listener
         .set_nonblocking(ListenerNonblockingMode::Accept)
         .expect("set listener nonblocking");
+    crate::ipc::public_endpoints::Admission::lock(&dir.join("api.sock"))
+        .expect("fixture admission")
+        .publish(&socket_path, &client_socket_identity)
+        .expect("fixture endpoint record");
     let (server_event_tx, server_event_rx) = mpsc::channel(64);
     let should_quit = Arc::new(AtomicBool::new(false));
     #[cfg(windows)]
@@ -61,8 +65,9 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         api_server: None,
         #[cfg(unix)]
         client_listener: listener,
+        endpoint_admission_path: dir.join("api.sock"),
         client_socket_path: socket_path,
-        client_socket_identity,
+        client_socket_identity: Some(client_socket_identity),
         clients: HashMap::new(),
         #[cfg(unix)]
         next_client_id: 1,

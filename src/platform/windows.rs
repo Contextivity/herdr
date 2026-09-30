@@ -1233,6 +1233,18 @@ fn select_pane_foreground_job_from_snapshot_with_runtime_inspection(
     Some(foreground_job_from_entry(selected))
 }
 
+// Endpoint records use the containing user's directory ACL on Windows. Cold
+// reclamation remains held because PID lifetime/boot evidence is unavailable.
+pub(crate) fn private_endpoint_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    options
+}
+
+pub(crate) fn validate_private_endpoint_file(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 fn select_pane_foreground_job(
     shell_pid: u32,
