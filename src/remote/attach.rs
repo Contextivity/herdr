@@ -1844,6 +1844,10 @@ impl SshStdioBridge {
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(BRIDGE_ACCEPT_POLL);
                     }
+                    Err(err) if crate::ipc::is_retryable_listener_error(&err) => {
+                        tracing::warn!(error = %err, "remote bridge listener failed; retrying");
+                        thread::sleep(crate::ipc::LISTENER_RETRY_DELAY);
+                    }
                     Err(err) => {
                         if noninteractive {
                             tracing::warn!(error = %err, "saved SSH endpoint listener failed");
