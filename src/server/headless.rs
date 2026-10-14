@@ -39,8 +39,6 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
-#[cfg(windows)]
-use crate::ipc::LISTENER_RETRY_DELAY;
 use crate::ipc::{
     bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
     SocketFileIdentity,
@@ -269,14 +267,6 @@ fn spawn_windows_client_accept_thread(
         while !should_quit.load(Ordering::Acquire) {
             let stream = match listener.accept() {
                 Ok(stream) => stream,
-                Err(err) if crate::ipc::is_retryable_listener_error(&err) => {
-                    if should_quit.load(Ordering::Acquire) {
-                        break;
-                    }
-                    warn!(err = %err, "client listener accept failed; retrying");
-                    std::thread::sleep(LISTENER_RETRY_DELAY);
-                    continue;
-                }
                 Err(err) => {
                     if should_quit.load(Ordering::Acquire) {
                         break;
@@ -297,9 +287,9 @@ fn spawn_windows_client_accept_thread(
 
             let should_quit = should_quit.clone();
             let server_event_tx = server_event_tx.clone();
-            if let Err(err) = std::thread::Builder::new()
-                .name(format!("herdr-client-handshake-{client_id}"))
-                .spawn(move || {
+            crate::ipc::spawn_connection_thread(
+                std::thread::Builder::new().name(format!("herdr-client-handshake-{client_id}")),
+                move || {
                     if let Err(err) = crate::server::client_transport::handle_client_handshake(
                         stream,
                         client_id,
@@ -308,11 +298,8 @@ fn spawn_windows_client_accept_thread(
                     ) {
                         debug!(client_id, err = %err, "client handshake failed");
                     }
-                })
-            {
-                warn!(client_id, err = %err, "failed to spawn client handshake thread");
-                std::thread::sleep(LISTENER_RETRY_DELAY);
-            }
+                },
+            );
         }
     });
 }

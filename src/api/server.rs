@@ -17,10 +17,10 @@ use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_output};
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
-    bind_local_listener, is_connection_closed_error, is_retryable_listener_error,
+    back_off_after_transient_accept_error, bind_local_listener, is_connection_closed_error,
     local_stream_peer_closed, poll_local_stream_read, remove_socket_file_if_owned,
-    set_local_stream_polling, socket_file_identity, LocalStream, LocalStreamRead,
-    SocketFileIdentity, LISTENER_RETRY_DELAY,
+    set_local_stream_polling, socket_file_identity, spawn_connection_thread, LocalStream,
+    LocalStreamRead, SocketFileIdentity,
 };
 
 mod pane_graphics_stream;
@@ -92,28 +92,37 @@ fn start_server_inner(
     let running = Arc::new(AtomicBool::new(true));
     let listener_running = Arc::clone(&running);
     let thread = std::thread::spawn(move || {
-        run_api_listener(listener.incoming(), move |stream| {
-            let api_tx = api_tx.clone();
-            let event_hub = event_hub.clone();
-            let capabilities = capabilities.clone();
-            let server_stop = server_stop.clone();
-            let connection_running = Arc::clone(&listener_running);
-            std::thread::Builder::new()
-                .name("herdr-api-connection".to_owned())
-                .spawn(move || {
-                    if let Err(err) = handle_connection_with_stop(
-                        stream,
-                        &api_tx,
-                        &event_hub,
-                        &connection_running,
-                        capabilities,
-                        server_stop.as_ref(),
-                    ) {
-                        warn!(err = %err, "api connection failed");
-                    }
-                })
-                .map(|_| ())
-        });
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let api_tx = api_tx.clone();
+                    let event_hub = event_hub.clone();
+                    let capabilities = capabilities.clone();
+                    let server_stop = server_stop.clone();
+                    let connection_running = Arc::clone(&listener_running);
+                    spawn_connection_thread(
+                        std::thread::Builder::new().name("herdr-api-connection".to_owned()),
+                        move || {
+                            if let Err(err) = handle_connection_with_stop(
+                                stream,
+                                &api_tx,
+                                &event_hub,
+                                &connection_running,
+                                capabilities,
+                                server_stop.as_ref(),
+                            ) {
+                                warn!(err = %err, "api connection failed");
+                            }
+                        },
+                    );
+                }
+                Err(err) if back_off_after_transient_accept_error(&err, "api") => {}
+                Err(err) => {
+                    error!(err = %err, "api listener accept failed");
+                    break;
+                }
+            }
+        }
         debug!("api server thread exiting");
     });
 
@@ -123,31 +132,6 @@ fn start_server_inner(
         identity,
         running,
     })
-}
-
-fn run_api_listener<I, S, F>(incoming: I, mut spawn_connection: F)
-where
-    I: IntoIterator<Item = std::io::Result<S>>,
-    F: FnMut(S) -> std::io::Result<()>,
-{
-    for stream in incoming {
-        match stream {
-            Ok(stream) => {
-                if let Err(err) = spawn_connection(stream) {
-                    warn!(err = %err, "failed to spawn api connection thread");
-                    std::thread::sleep(LISTENER_RETRY_DELAY);
-                }
-            }
-            Err(err) if is_retryable_listener_error(&err) => {
-                warn!(err = %err, "api listener accept failed; retrying");
-                std::thread::sleep(LISTENER_RETRY_DELAY);
-            }
-            Err(err) => {
-                error!(err = %err, "api listener accept failed");
-                break;
-            }
-        }
-    }
 }
 
 fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
@@ -1011,29 +995,6 @@ mod tests {
         let client = crate::ipc::connect_local_stream(&path).unwrap();
         let server = listener.accept().unwrap();
         (client, server, path)
-    }
-
-    #[test]
-    fn api_listener_continues_after_connection_thread_spawn_failure() {
-        let attempted_connections = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let attempted_connections_for_spawn = Arc::clone(&attempted_connections);
-
-        run_api_listener(vec![Ok(1_u8), Ok(2_u8)], move |connection| {
-            attempted_connections_for_spawn
-                .lock()
-                .unwrap()
-                .push(connection);
-            if connection == 1 {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "injected thread spawn failure",
-                ))
-            } else {
-                Ok(())
-            }
-        });
-
-        assert_eq!(*attempted_connections.lock().unwrap(), vec![1, 2]);
     }
 
     fn pane_info(
