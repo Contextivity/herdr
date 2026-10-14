@@ -5,7 +5,7 @@ use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use crate::ipc::LocalListener;
+use crate::ipc::{is_retryable_listener_error, LocalListener, LISTENER_RETRY_DELAY};
 use crate::server::client_transport::{self, ServerEvent};
 
 /// Accepts pending thin-client connections and starts their handshake readers.
@@ -31,18 +31,28 @@ pub(crate) fn accept_pending_client_connections(
 
                 let should_quit = should_quit.clone();
                 let server_event_tx = server_event_tx.clone();
-                std::thread::spawn(move || {
-                    if let Err(err) = client_transport::handle_client_handshake(
-                        stream,
-                        client_id,
-                        &server_event_tx,
-                        &should_quit,
-                    ) {
-                        debug!(client_id, err = %err, "client handshake failed");
-                    }
-                });
+                if let Err(err) = std::thread::Builder::new()
+                    .name(format!("herdr-client-handshake-{client_id}"))
+                    .spawn(move || {
+                        if let Err(err) = client_transport::handle_client_handshake(
+                            stream,
+                            client_id,
+                            &server_event_tx,
+                            &should_quit,
+                        ) {
+                            debug!(client_id, err = %err, "client handshake failed");
+                        }
+                    })
+                {
+                    warn!(client_id, err = %err, "failed to spawn client handshake thread");
+                    std::thread::sleep(LISTENER_RETRY_DELAY);
+                }
             }
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(ref err) if is_retryable_listener_error(err) => {
+                warn!(err = %err, "client listener accept failed; retrying");
+                std::thread::sleep(LISTENER_RETRY_DELAY);
+            }
             Err(err) => {
                 error!(err = %err, "client listener accept failed");
                 break;
@@ -62,6 +72,10 @@ pub(crate) fn reject_pending_client_connections(listener: &LocalListener) -> io:
         match listener.accept() {
             Ok(_stream) => {}
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(ref err) if is_retryable_listener_error(err) => {
+                warn!(err = %err, "client listener reject failed; retrying");
+                std::thread::sleep(LISTENER_RETRY_DELAY);
+            }
             Err(err) => {
                 error!(err = %err, "client listener reject failed");
                 break;

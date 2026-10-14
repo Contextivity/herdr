@@ -3,12 +3,15 @@ use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
+
+pub(crate) const LISTENER_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub(crate) enum LocalStreamRead {
     Data,
@@ -270,6 +273,32 @@ pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
             | io::ErrorKind::UnexpectedEof
             | io::ErrorKind::WriteZero
     )
+}
+
+pub(crate) fn is_retryable_listener_error(err: &io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted
+    ) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        matches!(
+            err.raw_os_error(),
+            Some(code)
+                if code == libc::EMFILE
+                    || code == libc::ENFILE
+                    || code == libc::ENOBUFS
+                    || code == libc::ENOMEM
+        )
+    }
+
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 #[cfg(windows)]
