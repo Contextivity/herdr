@@ -287,16 +287,19 @@ fn spawn_windows_client_accept_thread(
 
             let should_quit = should_quit.clone();
             let server_event_tx = server_event_tx.clone();
-            std::thread::spawn(move || {
-                if let Err(err) = crate::server::client_transport::handle_client_handshake(
-                    stream,
-                    client_id,
-                    &server_event_tx,
-                    &should_quit,
-                ) {
-                    debug!(client_id, err = %err, "client handshake failed");
-                }
-            });
+            crate::ipc::spawn_connection_thread(
+                std::thread::Builder::new().name(format!("herdr-client-handshake-{client_id}")),
+                move || {
+                    if let Err(err) = crate::server::client_transport::handle_client_handshake(
+                        stream,
+                        client_id,
+                        &server_event_tx,
+                        &should_quit,
+                    ) {
+                        debug!(client_id, err = %err, "client handshake failed");
+                    }
+                },
+            );
         }
     });
 }

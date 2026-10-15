@@ -3,12 +3,15 @@ use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::time::Duration;
 
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
 
 pub(crate) type LocalListener = interprocess::local_socket::Listener;
 pub(crate) type LocalStream = interprocess::local_socket::Stream;
+
+const LISTENER_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 pub(crate) enum LocalStreamRead {
     Data,
@@ -272,6 +275,46 @@ pub(crate) fn is_connection_closed_error(err: &io::Error) -> bool {
     )
 }
 
+/// Runs one connection's `handler` on its own thread. `std::thread::spawn`
+/// panics when the OS refuses a thread, which ends the accept loop that called
+/// it; this logs instead, drops `handler` with the connection it owns, and
+/// backs off briefly so a sustained shortage does not spin the loop.
+pub(crate) fn spawn_connection_thread(
+    builder: std::thread::Builder,
+    handler: impl FnOnce() + Send + 'static,
+) {
+    if let Err(err) = builder.spawn(handler) {
+        tracing::warn!(err = %err, "failed to spawn connection thread; dropping connection");
+        std::thread::sleep(LISTENER_RETRY_DELAY);
+    }
+}
+
+/// Logs and backs off after a transient accept error: interrupted, aborted,
+/// or out of descriptors or memory. Returns `false` when the error should end
+/// the listener.
+pub(crate) fn back_off_after_transient_accept_error(err: &io::Error, listener: &str) -> bool {
+    #[cfg(unix)]
+    let out_of_resources = matches!(
+        err.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+    );
+    #[cfg(not(unix))]
+    let out_of_resources = false;
+
+    let transient = out_of_resources
+        || matches!(
+            err.kind(),
+            io::ErrorKind::WouldBlock
+                | io::ErrorKind::Interrupted
+                | io::ErrorKind::ConnectionAborted
+        );
+    if transient {
+        tracing::warn!(listener, err = %err, "listener accept failed; retrying");
+        std::thread::sleep(LISTENER_RETRY_DELAY);
+    }
+    transient
+}
+
 #[cfg(windows)]
 fn windows_named_pipe_closed_error(err: &io::Error) -> bool {
     matches!(err.raw_os_error(), Some(6 | 109 | 232 | 233))
@@ -344,6 +387,22 @@ mod tests {
     use interprocess::local_socket::traits::Listener as _;
     #[cfg(windows)]
     use std::path::PathBuf;
+
+    #[test]
+    fn refused_connection_thread_drops_the_connection_without_panicking() {
+        let (connection, closed) = std::sync::mpsc::channel::<()>();
+        // No platform can reserve a 1 EiB stack, so the OS refuses this thread
+        // the way an exhausted task limit does.
+        spawn_connection_thread(std::thread::Builder::new().stack_size(1 << 60), move || {
+            let _ = connection.send(());
+        });
+
+        assert_eq!(
+            closed.recv(),
+            Err(std::sync::mpsc::RecvError),
+            "the refused handler must be dropped, not run"
+        );
+    }
 
     #[test]
     fn stale_socket_connect_errors_keep_unix_would_block_strict() {

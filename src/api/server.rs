@@ -17,9 +17,10 @@ use crate::api::subscriptions::ActiveSubscription;
 use crate::api::wait::{prompt_agent, wait_for_agent, wait_for_event, wait_for_output};
 use crate::api::{request_changes_ui, socket_path, ApiRequestMessage, ApiRequestSender, EventHub};
 use crate::ipc::{
-    bind_local_listener, is_connection_closed_error, local_stream_peer_closed,
-    poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
-    socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
+    back_off_after_transient_accept_error, bind_local_listener, is_connection_closed_error,
+    local_stream_peer_closed, poll_local_stream_read, remove_socket_file_if_owned,
+    set_local_stream_polling, socket_file_identity, spawn_connection_thread, LocalStream,
+    LocalStreamRead, SocketFileIdentity,
 };
 
 mod pane_graphics_stream;
@@ -99,19 +100,23 @@ fn start_server_inner(
                     let capabilities = capabilities.clone();
                     let server_stop = server_stop.clone();
                     let connection_running = Arc::clone(&listener_running);
-                    std::thread::spawn(move || {
-                        if let Err(err) = handle_connection_with_stop(
-                            stream,
-                            &api_tx,
-                            &event_hub,
-                            &connection_running,
-                            capabilities,
-                            server_stop.as_ref(),
-                        ) {
-                            warn!(err = %err, "api connection failed");
-                        }
-                    });
+                    spawn_connection_thread(
+                        std::thread::Builder::new().name("herdr-api-connection".to_owned()),
+                        move || {
+                            if let Err(err) = handle_connection_with_stop(
+                                stream,
+                                &api_tx,
+                                &event_hub,
+                                &connection_running,
+                                capabilities,
+                                server_stop.as_ref(),
+                            ) {
+                                warn!(err = %err, "api connection failed");
+                            }
+                        },
+                    );
                 }
+                Err(err) if back_off_after_transient_accept_error(&err, "api") => {}
                 Err(err) => {
                     error!(err = %err, "api listener accept failed");
                     break;

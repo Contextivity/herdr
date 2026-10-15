@@ -5,7 +5,7 @@ use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use crate::ipc::LocalListener;
+use crate::ipc::{spawn_connection_thread, LocalListener};
 use crate::server::client_transport::{self, ServerEvent};
 
 /// Accepts pending thin-client connections and starts their handshake readers.
@@ -31,16 +31,19 @@ pub(crate) fn accept_pending_client_connections(
 
                 let should_quit = should_quit.clone();
                 let server_event_tx = server_event_tx.clone();
-                std::thread::spawn(move || {
-                    if let Err(err) = client_transport::handle_client_handshake(
-                        stream,
-                        client_id,
-                        &server_event_tx,
-                        &should_quit,
-                    ) {
-                        debug!(client_id, err = %err, "client handshake failed");
-                    }
-                });
+                spawn_connection_thread(
+                    std::thread::Builder::new().name(format!("herdr-client-handshake-{client_id}")),
+                    move || {
+                        if let Err(err) = client_transport::handle_client_handshake(
+                            stream,
+                            client_id,
+                            &server_event_tx,
+                            &should_quit,
+                        ) {
+                            debug!(client_id, err = %err, "client handshake failed");
+                        }
+                    },
+                );
             }
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
